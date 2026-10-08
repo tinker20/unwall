@@ -1027,12 +1027,15 @@ const unesc = s => String(s).replace(/&(amp|lt|gt|quot|#39|#x27|nbsp);/g, (m, e)
 const icon = n => `<svg class="ic" aria-hidden="true"><use href="#i-${n}"/></svg>`;
 const words = s => (String(s).match(/[\p{L}\p{N}][\p{L}\p{N}'’-]*/gu) || []).length;
 const fmt = n => n.toLocaleString('en-US');
+const plural = (n, w) => `${n} ${w}${n === 1 ? '' : 's'}`;
 const pad = n => String(n).padStart(2, '0');
 const fmtSec = s => s < 60 ? `${s} sec` : `${Math.round(s / 60)} min`;
 const WPM = 220;
 const readLabel = w => `${fmtSec(Math.max(10, Math.round(w / WPM * 6) * 10))} read`;
 const wait = ms => new Promise(r => setTimeout(r, ms));
 const frame = () => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
+// a page piece taller than its box (a few px of slack for rounding)
+const overflows = el => el.scrollHeight > el.clientHeight + 4;
 const hash = s => { let h = 0x811c9dc5; for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 16777619) } return (h >>> 0).toString(36) };
 const clip = (s, n) => { s = String(s).trim(); if (s.length <= n) return s; const c = s.lastIndexOf(' ', n - 1); return s.slice(0, c > n * .6 ? c : n - 1).replace(/[\s,;:—–-]+$/, '') + '…' };
 // sentence splitter that survives "4.0", "**bold.**" and closing quotes
@@ -1094,14 +1097,17 @@ const SUMMARY_RX = /\b(?:tl;?\s?dr|summary|in short|in a nutshell|bottom line|ke
 const PROS_RX = /\b(?:pros|advantages|benefits|upsides|strengths)\b/i;
 const CONS_RX = /\b(?:cons|disadvantages|drawbacks|downsides|weaknesses)\b/i;
 const LABEL_RX = /^(?:note|tip|warning|important|caution|example|tl;?\s?dr|summary|pros?|cons?|update|edit|answer|step \d+)$/i;
+// every part gets one kind: it picks the label, icon and colour (CSS k-* classes, KIND[k].col on image cards)
 const KIND = {
-  summary: {label: 'Bottom line', ic: 'target'}, steps: {label: 'Steps', ic: 'steps'}, compare: {label: 'Comparison', ic: 'table'},
-  breakdown: {label: 'Breakdown', ic: 'list'}, list: {label: 'List', ic: 'list'}, code: {label: 'Code', ic: 'code'},
-  proscons: {label: 'Pros & cons', ic: 'scale'}, quote: {label: 'Quotes', ic: 'quote'}, prose: {label: 'Explainer', ic: 'text'},
+  summary: {label: 'Bottom line', ic: 'target', col: 'y'}, steps: {label: 'Steps', ic: 'steps', col: 'g'}, compare: {label: 'Comparison', ic: 'table', col: 'b'},
+  breakdown: {label: 'Breakdown', ic: 'list', col: 'o'}, list: {label: 'List', ic: 'list', col: 'o'}, code: {label: 'Code', ic: 'code', col: 'v'},
+  proscons: {label: 'Pros & cons', ic: 'scale', col: 'm'}, quote: {label: 'Quotes', ic: 'quote', col: 'p'}, prose: {label: 'Explainer', ic: 'text', col: 'n'},
 };
 const plainRaw = toks => (toks || []).map(t => t.type === 'html' ? '' : t.type === 'br' ? ' ' : t.tokens && t.type !== 'codespan' ? plainRaw(t.tokens) : (t.text ?? '')).join('');
 const plain = toks => unesc(plainRaw(toks)).replace(/\s+/g, ' ');
 const flat = md => plain(marked.Lexer.lexInline(md)).trim();
+// a bold lead-in as a name: "**Equity:**" -> "Equity"
+const labelText = toks => plain(toks).replace(/[\s:.—–-]+$/, '');
 function blockText(t) {
   switch (t.type) {
     case 'paragraph': case 'heading': case 'text': return t.tokens ? plain(t.tokens) : unesc(t.text || '');
@@ -1124,7 +1130,7 @@ const leadsBold = it => firstInline(itemInline(it))?.type === 'strong';
 const boldRatio = l => l.items.filter(leadsBold).length / (l.items.length || 1);
 const leadOf = it => {
   const inl = itemInline(it), f = firstInline(inl);
-  if (f?.type === 'strong') return plain(f.tokens).replace(/[\s:.—–-]+$/, '');
+  if (f?.type === 'strong') return labelText(f.tokens);
   return clip(plain(inl).split(/:\s|\s[—–]\s|\.\s/)[0], 46);
 };
 function titleClip(s) {
@@ -1161,7 +1167,7 @@ function itemSection(it) {
   if (f?.type !== 'strong') return {title: leadOf(it), tokens: it.tokens};
   const rest = inl.slice(inl.indexOf(f) + 1).map((x, n) => n === 0 && x.type === 'text' ? {...x, text: x.text.replace(/^\s*[:.—–-]\s*/, ''), raw: x.raw.replace(/^\s*[:.—–-]\s*/, '')} : x);
   const body = plain(rest).trim() ? [{type: 'paragraph', raw: '', text: '', tokens: rest}] : [];
-  return {title: plain(f.tokens).replace(/[\s:.—–-]+$/, ''), tokens: body.concat(it.tokens.filter(x => x !== host))};
+  return {title: labelText(f.tokens), tokens: body.concat(it.tokens.filter(x => x !== host))};
 }
 function kindOf(s) {
   if (SUMMARY_RX.test(s.title)) return 'summary';
@@ -1175,61 +1181,60 @@ function kindOf(s) {
   }
   return Object.entries(score).sort((a, b) => b[1] - a[1])[0]?.[0] || 'prose';
 }
+// shared by tile chips, tile previews and image cards
+const stepsOf = T => { const ls = T.filter(t => t.type === 'list'); return ls.find(l => l.ordered) || ls[0] };
+const listLeads = T => T.filter(t => t.type === 'list').flatMap(l => l.items.map(leadOf));
+const tableHead = tb => tb.header.map(c => plain(c.tokens).trim());
+// list items filed under the nearest "Pros" or "Cons" label
+function prosConsItems(T) {
+  let mode = ''; const pros = [], cons = [];
+  for (const t of T) {
+    if (t.type === 'heading' || isPseudo(t)) { const x = blockText(t); mode = PROS_RX.test(x) ? 'p' : CONS_RX.test(x) ? 'c' : mode }
+    else if (t.type === 'list' && mode) (mode === 'p' ? pros : cons).push(...t.items);
+  }
+  return {pros, cons};
+}
 function describe(s) {
-  const T = s.tokens, para = T.find(t => t.type === 'paragraph' && !isPseudo(t)), lists = T.filter(t => t.type === 'list');
-  let summary = para ? lede(blockText(para), 200) : '', chip = KIND[s.kind].label, preview = '';
-  const derived = !summary; // summary rebuilt from list leads, which the preview already shows
+  const T = s.tokens, para = T.find(t => t.type === 'paragraph' && !isPseudo(t));
+  let summary = para ? lede(blockText(para), 200) : '', chip = KIND[s.kind].label;
+  const derived = !summary; // summary rebuilt from list leads, which the tile preview already shows
   let sumMd = '';
   switch (s.kind) {
     case 'steps': {
-      const ls = (lists.find(l => l.ordered) || lists[0]).items.map(leadOf);
-      chip = `${ls.length} step${ls.length > 1 ? 's' : ''}`;
+      const ls = stepsOf(T).items.map(leadOf);
+      chip = plural(ls.length, 'step');
       summary ||= ls.slice(0, 3).join(' → ');
-      preview = `<ol class="pv-steps">${ls.slice(0, 3).map(l => `<li><span>${esc(l)}</span></li>`).join('')}${ls.length > 3 ? `<li class="more"><span>+${ls.length - 3} more</span></li>` : ''}</ol>`;
       break;
     }
     case 'breakdown': case 'list': {
-      const ls = lists.flatMap(l => l.items.map(leadOf));
+      const ls = listLeads(T);
       chip = `${ls.length} ${s.kind === 'list' ? 'items' : 'points'}`;
       summary ||= ls.slice(0, 4).join(' · ');
-      preview = `<div class="pv-chips">${ls.slice(0, 5).map(l => `<span>${esc(clip(l, 30))}</span>`).join('')}</div>`;
       break;
     }
     case 'compare': {
-      const tb = T.find(t => t.type === 'table'), head = tb.header.map(c => plain(c.tokens).trim());
+      const tb = T.find(t => t.type === 'table'), head = tableHead(tb);
       const generic = !head[0] || /^(?:feature|aspect|criteri(?:a|on)|category|factor|metric|dimension|attribute|comparison)s?$/i.test(head[0]);
       chip = `${tb.rows.length} rows`;
       summary ||= generic && head.length > 2 ? `${head.slice(1).join(' vs ')} across ${tb.rows.length} criteria` : `Compares ${tb.rows.slice(0, 3).map(r => plain(r[0].tokens)).join(', ')}${tb.rows.length > 3 ? '…' : ''}`;
-      preview = `<div class="pv-table">${head.filter(Boolean).slice(0, 4).map(h => `<span>${esc(clip(h, 20))}</span>`).join('')}<em>× ${tb.rows.length}</em></div>`;
       break;
     }
     case 'code': {
       const cs = T.filter(t => t.type === 'code'), langs = [...new Set(cs.map(c => c.lang || 'code'))];
       chip = cs.length > 1 ? `${cs.length} snippets` : `${langs[0]} · ${cs[0].text.split('\n').length} lines`;
       summary ||= `${langs.join(' + ')} example`;
-      preview = `<pre class="pv-code">${esc(cs[0].text.split('\n').slice(0, 3).join('\n'))}</pre>`;
       break;
     }
     case 'proscons': {
-      let mode = '', p = 0, c = 0;
-      for (const t of T) {
-        if (t.type === 'heading' || isPseudo(t)) { const x = blockText(t); mode = PROS_RX.test(x) ? 'p' : CONS_RX.test(x) ? 'c' : mode }
-        else if (t.type === 'list') { if (mode === 'p') p += t.items.length; if (mode === 'c') c += t.items.length }
-      }
-      chip = `${p} pros · ${c} cons`;
+      const {pros, cons} = prosConsItems(T);
+      chip = `${pros.length} pros · ${cons.length} cons`;
       summary ||= 'Both sides, weighed up.';
-      preview = `<div class="pv-pc"><span class="pos">+ ${p} for</span><span class="neg">− ${c} against</span></div>`;
       break;
     }
-    case 'quote': {
-      const qs = T.filter(t => t.type === 'blockquote');
-      chip = `${qs.length} quote${qs.length > 1 ? 's' : ''}`;
-      preview = `<blockquote class="pv-quote">${esc(clip(blockText(qs[0]), 140))}</blockquote>`;
-      break;
-    }
+    case 'quote': chip = plural(T.filter(t => t.type === 'blockquote').length, 'quote'); break;
     case 'summary': sumMd = lede(para ? para.raw.trim() : T.map(blockText).join(' '), 320); summary = flat(sumMd); break;
   }
-  return {chip, summary, sumMd: sumMd || summary, preview, derived};
+  return {chip, summary, sumMd: sumMd || summary, derived};
 }
 function eachInline(tokens, fn) {
   for (const t of tokens) {
@@ -1267,23 +1272,18 @@ function keyIdeas(secs) {
   if (picked.length >= 3) return picked;
   return secs.filter(s => s.kind !== 'summary' && s.summary).slice(0, 6).map(s => ({si: s.i, term: s.title, def: s.summary}));
 }
-function analyze(raw) {
-  const {md: clean, removed} = deFluff(raw), md = promoteHeads(clean);
-  const all = marked.lexer(md);
-  let blocks = all.filter(t => !['space', 'hr'].includes(t.type) && !(t.type === 'html' && !String(t.text).trim()));
-  let title = '', fromIntro = false;
-  const heads = blocks.filter(t => t.type === 'heading');
-  if (blocks[0]?.type === 'heading' && heads.filter(h => h.depth <= blocks[0].depth).length === 1) { title = plain(blocks[0].tokens); blocks = blocks.slice(1) }
+// Parts, in order of preference: the shallowest heading level used at least twice, bold pseudo-headings,
+// one long list of bold-led items, and for a true wall, runs of ~110 words cut between sentences.
+function splitParts(blocks) {
   let intro = [], secs = [];
   const split = (isHead, name) => { let cur = null; for (const t of blocks) { if (isHead(t)) secs.push(cur = {title: name(t), tokens: []}); else (cur ? cur.tokens : intro).push(t) } };
   const hs = blocks.filter(t => t.type === 'heading');
   if (hs.length) {
-    // the shallowest heading level used at least twice defines the parts
     const depths = [...new Set(hs.map(h => h.depth))].sort((a, b) => a - b);
     const d = depths.find(x => hs.filter(h => h.depth === x).length >= 2) ?? depths[0];
     split(t => t.type === 'heading' && t.depth <= d, t => plain(t.tokens));
   } else if (blocks.filter(isPseudo).length >= 2) {
-    split(isPseudo, t => plain(t.tokens).replace(/[\s:.—–-]+$/, ''));
+    split(isPseudo, t => labelText(t.tokens));
   } else {
     const list = blocks.filter(t => t.type === 'list' && t.items.length >= 3 && boldRatio(t) >= .6).sort((a, b) => b.items.length - a.items.length)[0];
     if (list) {
@@ -1292,7 +1292,7 @@ function analyze(raw) {
       secs = list.items.map(itemSection);
       if (tail.length) secs.push({title: SUMMARY_RX.test(blockText(tail[0]).slice(0, 40)) ? 'Bottom line' : 'Wrap-up', tokens: tail});
     } else {
-      // a true wall: long paragraphs break between sentences, then gather into parts of ~110+ words
+      // long paragraphs break between sentences, then gather into parts of ~110+ words
       const big = blocks.length < 3 ? 60 : 110;
       const bits = blocks.flatMap(t => t.type === 'paragraph' && tokWords(t) > big ? splitPara(t, big * .7) : [t]);
       intro = bits.slice(0, 1);
@@ -1303,26 +1303,26 @@ function analyze(raw) {
   }
   secs = secs.filter(s => s.title || s.tokens.length);
   if (!secs.length) { secs = [{title: 'The answer', tokens: intro}]; intro = [] }
-  secs.forEach((s, i) => {
-    s.i = i;
-    s.words = words(s.title) + s.tokens.reduce((n, t) => n + tokWords(t), 0);
-    s.kind = kindOf(s);
-    Object.assign(s, describe(s));
-  });
-  // sentences stay Markdown so the TL;DR keeps its bold and code
+  return {intro, secs};
+}
+// title, TL;DR and context. Sentences stay Markdown so the TL;DR keeps its bold and code.
+function gistOf(title, intro, secs) {
   const introMd = sentences(intro.filter(t => t.type === 'paragraph').map(t => t.raw.trim()).join(' '));
+  let fromIntro = false;
   if (!title) { if (introMd[0]) { title = titleClip(flat(introMd[0])); fromIntro = true } else title = leadTitle(secs[0]) || 'Untitled answer' }
   const sum = secs.find(s => s.kind === 'summary'), rest = introMd.slice(fromIntro ? 1 : 0).join(' ');
   let tldrMd, contextMd = '';
   if (sum) { tldrMd = sum.sumMd; contextMd = lede(rest, 300) }
   else if (rest) tldrMd = lede(rest, 320);
   else tldrMd = lede(secs.filter(s => s.summary).slice(0, 2).map(s => s.summary.replace(/([^.!?])$/, '$1.')).join(' '), 320) || 'Open the parts below to dig in.';
-  const tldr = flat(tldrMd), context = flat(contextMd);
-  const ideas = keyIdeas(secs), stepSec = secs.find(s => s.kind === 'steps');
-  const links = [], seenL = new Set();
+  return {title, tldrMd, contextMd};
+}
+// every distinct web link, in reading order, wherever it sits (lists, quotes, table cells)
+function collectLinks(all) {
+  const links = [], seen = new Set();
   const walk = toks => (toks || []).forEach(t => {
-    if (t.type === 'link' && /^https?:\/\//i.test(t.href) && !seenL.has(t.href)) {
-      seenL.add(t.href); let host = ''; try { host = new URL(t.href).hostname.replace(/^www\./, '') } catch {}
+    if (t.type === 'link' && /^https?:\/\//i.test(t.href) && !seen.has(t.href)) {
+      seen.add(t.href); let host = ''; try { host = new URL(t.href).hostname.replace(/^www\./, '') } catch {}
       links.push({href: t.href, text: plain(t.tokens), host});
     }
     if (t.tokens) walk(t.tokens);
@@ -1330,12 +1330,30 @@ function analyze(raw) {
     if (t.type === 'table') [t.header, ...t.rows].forEach(r => r.forEach(c => walk(c.tokens)));
   });
   walk(all);
+  return links;
+}
+function analyze(raw) {
+  const {md: clean, removed} = deFluff(raw), md = promoteHeads(clean);
+  const all = marked.lexer(md);
+  let blocks = all.filter(t => !['space', 'hr'].includes(t.type) && !(t.type === 'html' && !String(t.text).trim())), h1 = '';
+  // a lone top-level heading names the whole answer rather than its first part
+  const heads = blocks.filter(t => t.type === 'heading');
+  if (blocks[0]?.type === 'heading' && heads.filter(h => h.depth <= blocks[0].depth).length === 1) { h1 = plain(blocks[0].tokens); blocks = blocks.slice(1) }
+  const {intro, secs} = splitParts(blocks);
+  secs.forEach((s, i) => {
+    s.i = i;
+    s.words = words(s.title) + s.tokens.reduce((n, t) => n + tokWords(t), 0);
+    s.kind = kindOf(s);
+    Object.assign(s, describe(s));
+  });
+  const {title, tldrMd, contextMd} = gistOf(h1, intro, secs), tldr = flat(tldrMd), context = flat(contextMd);
+  const ideas = keyIdeas(secs), stepSec = secs.find(s => s.kind === 'steps');
   const codes = [];
   secs.forEach(s => s.tokens.forEach(t => t.type === 'code' && codes.push({si: s.i, lang: t.lang || 'text', text: t.text, lines: t.text.split('\n').length})));
   const total = words(md);
   const gistW = words([title, tldr, context, ...ideas.map(k => `${k.term} ${k.def || k.sent || ''}`)].join(' '));
   return {
-    md, removed, title, tldr, tldrMd, context, contextMd, intro, secs, ideas, stepSec, links, codes, refs: all.links || {},
+    md, removed, title, tldr, tldrMd, context, contextMd, intro, secs, ideas, stepSec, links: collectLinks(all), codes, refs: all.links || {},
     stepList: stepSec?.tokens.find(t => t.type === 'list' && t.ordered),
     words: total, readMin: Math.max(1, Math.round(total / WPM)), gistSec: Math.max(15, Math.round(gistW / WPM * 12) * 5),
   };
@@ -1343,7 +1361,7 @@ function analyze(raw) {
 
 /* ============ rendering helpers ============ */
 const PURIFY = {ADD_ATTR: ['target'], FORBID_TAGS: ['style', 'form', 'button', 'textarea', 'select', 'img', 'video', 'audio', 'iframe', 'object', 'embed'], FORBID_ATTR: ['style', 'id', 'name']};
-const mdHtml = tokens => DOMPurify.sanitize(marked.parser(Object.assign(tokens.slice(), {links: M?.refs || {}})), PURIFY);
+const mdHtml = tokens => DOMPurify.sanitize(marked.parser(Object.assign(tokens.slice(), {links: model?.refs || {}})), PURIFY);
 const inl = md => DOMPurify.sanitize(marked.parseInline(md || ''), PURIFY);
 function paint(li, on) {
   li.classList.toggle('done', on);
@@ -1360,8 +1378,8 @@ function checkify(li, n) {
   const b = document.createElement('button');
   b.type = 'button'; b.className = 'chk'; b.dataset.key = key; if (n != null) b.dataset.n = n;
   li.dataset.key = key; li.prepend(b);
-  if (D && !(key in D.checks) && li.dataset.init) D.checks[key] = true;
-  paint(li, !!D?.checks[key]);
+  if (doc && !(key in doc.checks) && li.dataset.init) doc.checks[key] = true;
+  paint(li, !!doc?.checks[key]);
 }
 function wrapLi(li) {
   if ([...li.children].some(n => /^(P|PRE|DIV|BLOCKQUOTE|TABLE|H\d)$/.test(n.tagName))) return;
@@ -1417,7 +1435,7 @@ function enhance(root, lead = false) {
     const pre = code.parentElement, lang = (code.className.match(/language-([\w+#-]+)/) || [])[1] || '';
     const n = code.textContent.replace(/\n$/, '').split('\n').length;
     const box = document.createElement('div'); box.className = 'codebox';
-    box.innerHTML = `<div class="cb-head"><span class="cb-lang">${esc(lang || 'code')}</span><span>${n} line${n > 1 ? 's' : ''}</span><button type="button" class="cb-copy" data-act="copy-code">${icon('copy')}<span>Copy</span></button></div>`;
+    box.innerHTML = `<div class="cb-head"><span class="cb-lang">${esc(lang || 'code')}</span><span>${plural(n, 'line')}</span><button type="button" class="cb-copy" data-act="copy-code">${icon('copy')}<span>Copy</span></button></div>`;
     pre.replaceWith(box); box.append(pre);
     if (lang && window.hljs?.getLanguage(lang)) try { hljs.highlightElement(code) } catch {}
   });
@@ -1445,8 +1463,22 @@ function pack(secs) {
 }
 
 /* ============ state + storage ============ */
-let D = null, M = null, MODE = 'overview', SCREEN = 'home', C = [], ci = 0, fi = 0, io = null, shareURL = '', warnedStore = false, docsMem = null;
+let doc = null;       // the open answer as stored: {id, md, title, checks, seen, mode, ls?, temp?}
+let model = null;     // analyze(doc.md), rebuilt on open and never stored
+let MODE = 'overview', SCREEN = 'home';
+let deck = [], cardIdx = 0; // cards view: built by renderCards, cardIdx is the card on top
+let focusIdx = 0;     // part shown in the focus sheet
+let io = null, shareURL = '', warnedStore = false, docsMem = null;
+const MODES = ['overview', 'cards', 'read'];
 const KEY = 'unwall.v1.docs';
+const MIN_WORDS = 25; // shorter than this reads fine as it is
+// what the library list shows without re-analysing every answer
+const docStats = m => ({read: m.readMin, gist: m.gistSec, nsec: m.secs.length});
+// small per-browser preferences (theme, skim, image options); a blocked localStorage just means defaults
+const pref = {
+  get(k, d = '') { try { return localStorage.getItem('unwall.' + k) ?? d } catch { return d } },
+  set(k, v) { try { localStorage.setItem('unwall.' + k, v) } catch {} },
+};
 function loadDocs() {
   if (docsMem) return docsMem;
   try { docsMem = JSON.parse(localStorage.getItem(KEY) || '[]') } catch { docsMem = [] }
@@ -1467,13 +1499,13 @@ function saveDocs(docs) {
   if (!warnedStore) { warnedStore = true; toast('This browser blocks saving, so your library will reset when you close the tab.') }
   return false;
 }
-function saveDoc() { if (!D || D.temp) return; const docs = loadDocs(); const n = docs.findIndex(d => d.id === D.id); if (n > -1) docs[n] = D; saveDocs(docs) }
+function saveDoc() { if (!doc || doc.temp) return; const docs = loadDocs(); const n = docs.findIndex(d => d.id === doc.id); if (n > -1) docs[n] = doc; saveDocs(docs) }
 function upsert(md, m) {
   const id = hash(md), docs = loadDocs();
   let d = docs.find(x => x.id === id);
   if (d) docs.splice(docs.indexOf(d), 1);
   else d = {id, md, title: m.title, created: Date.now(), checks: {}, seen: []};
-  Object.assign(d, {opened: Date.now(), read: m.readMin, gist: m.gistSec, nsec: m.secs.length});
+  Object.assign(d, {opened: Date.now()}, docStats(m));
   docs.unshift(d); saveDocs(docs);
   return d;
 }
@@ -1488,42 +1520,42 @@ function goHome() {
 async function ingest(text) {
   text = normalize(text || '');
   if (!window.marked || !window.DOMPurify) return toast('The Markdown parser did not load. Check your connection and reload.');
-  if (words(text) < 25) return toast('That one is short enough to read as it is. Paste a longer answer.');
+  if (words(text) < MIN_WORDS) return toast('That one is short enough to read as it is. Paste a longer answer.');
   const m = analyze(text);
   $('#input').blur();
   await openDoc(upsert(text, m), m, true);
 }
 async function openDoc(d, m, animate) {
-  D = d; D.checks ||= {}; D.seen ||= [];
-  M = m || analyze(d.md);
+  doc = d; doc.checks ||= {}; doc.seen ||= [];
+  model = m || analyze(d.md);
   const finish = animate && !reduced ? await playUnwall() : null;
   SCREEN = 'digest'; document.body.dataset.screen = 'digest';
   $('#home').hidden = true; $('#digest').hidden = false;
-  document.title = `${D.title} · Unwall`;
-  ci = 0; C = [];
+  document.title = `${doc.title} · Unwall`;
+  cardIdx = 0; deck = [];
   renderOverview(); renderRead();
-  setMode(D.mode || 'overview');
+  setMode(doc.mode || 'overview');
   finish?.();
 }
 function setMode(mode) {
   MODE = mode;
-  ['overview', 'cards', 'read'].forEach((k, n) => {
+  MODES.forEach((k, n) => {
     $('#v-' + k).hidden = k !== mode;
     $(`.seg [data-mode="${k}"]`).setAttribute('aria-selected', String(k === mode));
     if (k === mode) $('.seg').style.setProperty('--m', n);
   });
   document.body.dataset.mode = mode;
   window.scrollTo(0, 0);
-  if (mode === 'cards' && M && (!C.length || renderCards.size !== deckSize())) renderCards();
-  if (D && D.mode !== mode) { D.mode = mode; saveDoc() }
+  if (mode === 'cards' && model && (!deck.length || renderCards.size !== deckSize())) renderCards();
+  if (doc && doc.mode !== mode) { doc.mode = mode; saveDoc() }
 }
 async function playUnwall() {
-  const ov = $('#unwall'), text = M.md.replace(/```[\s\S]*?```/g, ' ').replace(/[#>*_`|]+|:?-{3,}:?/g, ' ').replace(/\s+/g, ' ').trim();
+  const ov = $('#unwall'), text = model.md.replace(/```[\s\S]*?```/g, ' ').replace(/[#>*_`|]+|:?-{3,}:?/g, ' ').replace(/\s+/g, ' ').trim();
   const lines = []; for (let i = 0; i < text.length && lines.length < 15; i += 84) lines.push(text.slice(i, i + 84));
-  const total = M.secs.reduce((n, s) => n + s.words, 0) || 1; let acc = 0;
-  const marks = M.secs.map(s => [(acc += s.words / total), s.kind]);
+  const total = model.secs.reduce((n, s) => n + s.words, 0) || 1; let acc = 0;
+  const marks = model.secs.map(s => [(acc += s.words / total), s.kind]);
   ov.innerHTML = `<div class="uw-wall">${lines.map((l, n) => `<div class="uw-l k-${(marks.find(([a]) => (n + .5) / lines.length <= a) || marks.at(-1) || [0, 'prose'])[1]}" style="--i:${n}"><i></i><span>${esc(l)}</span></div>`).join('')}</div>
-    <p class="uw-cap"><span>${fmt(M.words)} words</span>${icon('arrow-right')}<span>${M.secs.length} parts</span>${icon('arrow-right')}<b>${fmtSec(M.gistSec)} gist</b></p>`;
+    <p class="uw-cap"><span>${fmt(model.words)} words</span>${icon('arrow-right')}<span>${model.secs.length} parts</span>${icon('arrow-right')}<b>${fmtSec(model.gistSec)} gist</b></p>`;
   ov.hidden = false;
   await frame(); ov.classList.add('show');
   await wait(420); ov.classList.add('sort');
@@ -1532,91 +1564,129 @@ async function playUnwall() {
 }
 
 /* ============ overview ============ */
+const ctaRow = () => `<button class="btn" data-go="cards">Swipe the cards<span class="bi">${icon('arrow')}</span></button><button class="btn ghost plain" data-act="story">${icon('play')}Play story</button><button class="btn ghost plain" data-go="read">Read in full</button>`;
+// the overview is one bento of cards; each builder takes r(), which numbers cards for the staggered rise
 function renderOverview() {
-  const v = $('#v-overview'), m = M;
-  const total = m.secs.reduce((n, s) => n + s.words, 0) || 1;
-  const big = m.secs.reduce((a, s) => s.words > a.words ? s : a, m.secs[0] || {words: 0, title: ''});
-  const kinds = {}; m.secs.forEach(s => kinds[s.kind] = (kinds[s.kind] || 0) + 1);
-  // long answers get a denser map; a one-part answer has no shape worth drawing
-  const dense = m.secs.length > 12, spans = dense ? m.secs.map(() => 4) : pack(m.secs), hasIdeas = m.ideas.length > 0, hasSteps = !!m.stepList, hasShape = m.secs.length > 1;
-  const OL = 10, ol = m.secs.length > OL ? m.secs.slice(0, OL - 1) : m.secs;
-  const ctas = `<button class="btn" data-go="cards">Swipe the cards<span class="bi">${icon('arrow')}</span></button><button class="btn ghost plain" data-act="story">${icon('play')}Play story</button><button class="btn ghost plain" data-go="read">Read in full</button>`;
+  const m = model, hasShape = m.secs.length > 1; // a one-part answer has no shape worth drawing
   let n = 0; const r = () => `style="--i:${n++}"`;
-  v.innerHTML = `
-  ${D.temp ? `<div class="banner rise" ${r()}><span>Someone shared this answer with you. It isn't in your library yet.</span><button class="mini-btn" data-act="save">${icon('plus')}Save to library</button></div>` : ''}
+  $('#v-overview').innerHTML = `
+  ${doc.temp ? `<div class="banner rise" ${r()}><span>Someone shared this answer with you. It isn't in your library yet.</span><button class="mini-btn" data-act="save">${icon('plus')}Save to library</button></div>` : ''}
   <div class="bento">
-    <article class="shell c-hero rise" ${r()}><div class="core hero">
-      <div class="hero-top"><span class="eyebrow">${icon('target')}The gist</span>${m.removed.length ? `<details class="fluff"><summary>${icon('scissors')}${m.removed.length} filler line${m.removed.length > 1 ? 's' : ''} removed</summary><ul class="fluff-list">${m.removed.map(x => `<li>${esc(x)}</li>`).join('')}</ul></details>` : ''}</div>
-      <h1 class="title" id="docTitle" contenteditable="plaintext-only" spellcheck="false" title="Click to rename">${esc(D.title)}</h1>
-      <p class="tldr">${inl(m.tldrMd)}</p>
-      ${m.context ? `<p class="context">${inl(m.contextMd)}</p>` : m.secs.length > 2 ? `<div class="outline"><span class="ol-label">Inside this answer</span><ol>${ol.map(s => `<li><button class="k-${s.kind}" data-open="${s.i}"><i></i><span class="idx">${pad(s.i + 1)}</span><span class="ol-t">${esc(s.title)}</span></button></li>`).join('')}${ol.length < m.secs.length ? `<li><button class="ol-more" data-go="read"><i></i><span class="idx">+${m.secs.length - ol.length}</span><span class="ol-t">more parts</span></button></li>` : ''}</ol></div>` : ''}
-      <div class="hero-cta">${ctas}</div>
-    </div></article>
-    <section class="shell c-time${hasShape ? '' : ' tall'} rise" ${r()}><div class="core time">
-      <span class="eyebrow">${icon('clock')}Time to understand</span>
-      <div class="time-row"><s>${m.readMin} min</s>${icon('arrow-right')}<b>${fmtSec(m.gistSec)}</b></div>
-      <p class="muted">to get the gist of all ${fmt(m.words)} words.</p>
-      <div class="meter"><div class="meter-bar"><i id="exploredBar"></i></div><span id="exploredTxt"></span></div>
-    </div></section>
-    ${hasShape ? `<section class="shell c-shape rise" ${r()}><div class="core shape">
-      <span class="eyebrow">${icon('grid')}Shape of the answer</span>
-      <div class="shape-bar">${m.secs.map((s, j) => `<button class="sg k-${s.kind}" style="flex-grow:${Math.max(s.words, 8)};--j:${j}" data-open="${s.i}" title="${esc(s.title)}" aria-label="Open part ${s.i + 1}: ${esc(s.title)}"></button>`).join('')}</div>
-      <p class="insight">The biggest part is <b>${esc(big.title)}</b>, ${Math.round(big.words / total * 100)}% of the text.</p>
-      <div class="legend">${Object.entries(kinds).map(([k, c]) => `<span class="lg k-${k}"><i></i>${KIND[k].label}${c > 1 ? `<em>×${c}</em>` : ''}</span>`).join('')}</div>
-    </div></section>` : ''}
-    ${hasIdeas ? `<section class="shell c-ideas${hasSteps ? '' : ' full'} rise" ${r()}><div class="core">
-      <div class="card-head"><span class="eyebrow">${icon('sparkle')}Key ideas</span><span class="hint">Pulled from what the answer put in bold</span></div>
-      <ul class="ideas">${m.ideas.map(k => `<li><button data-open="${k.si}" data-flash="${esc(k.term)}">${k.def != null ? `<span class="term"><mark>${esc(k.term)}</mark></span>${k.def ? `<span class="def">${esc(k.def)}</span>` : ''}` : `<span class="sent">${markIn(k.sent, k.term)}</span>`}<span class="from">${pad(k.si + 1)} · ${esc(m.secs[k.si].title)}</span></button></li>`).join('')}</ul>
-    </div></section>` : ''}
-    ${hasSteps ? `<section class="shell c-steps${hasIdeas ? '' : ' full'} rise" ${r()}><div class="core">
-      <div class="card-head"><span class="eyebrow">${icon('steps')}Do this</span><span class="hint" id="stepsCount"></span></div>
-      <h3 class="mini-title">${esc(m.stepSec.title)}</h3>
-      <div class="prose compact steps-host" id="stepsHost"></div>
-      <button class="link-btn" data-open="${m.stepSec.i}">Open the full steps${icon('arrow')}</button>
-    </div></section>` : ''}
+    ${heroCard(r)}
+    ${timeCard(r, hasShape)}
+    ${hasShape ? shapeCard(r) : ''}
+    ${m.ideas.length ? ideasCard(r, !m.stepList) : ''}
+    ${m.stepList ? stepsCard(r, !m.ideas.length) : ''}
   </div>
   <div class="sec-head rise" ${r()}>
-    <div><span class="eyebrow">${icon('grid')}Sections</span><h2>The answer in ${m.secs.length} part${m.secs.length > 1 ? 's' : ''}</h2></div>
+    <div><span class="eyebrow">${icon('grid')}Sections</span><h2>The answer in ${plural(m.secs.length, 'part')}</h2></div>
     <p>Open any part to read just that bit.</p>
   </div>
-  <div class="bento tiles${dense ? ' dense' : ''}">${m.secs.map((s, j) => `
-    <article class="shell tile sp-${spans[j]} k-${s.kind}${D.seen.includes(s.i) ? ' seen' : ''} rise" ${r()} data-sec="${s.i}">
-      <div class="core">
-        <div class="tile-top"><span class="idx">${pad(s.i + 1)}</span><span class="chip">${icon(KIND[s.kind].ic)}${esc(s.chip)}</span></div>
-        <h3 class="tile-title">${esc(s.title)}</h3>
-        ${s.summary && !(s.derived && s.preview && !dense) ? `<p class="tile-sum">${esc(s.summary)}</p>` : ''}
-        ${dense ? '' : s.preview}
-        <div class="tile-foot"><span>${readLabel(s.words)}</span><span class="seen-tag">${icon('check')}Read</span><span class="bi">${icon('arrow')}</span></div>
-      </div>
-      <button class="tile-hit" data-open="${s.i}" aria-label="Open part ${s.i + 1}: ${esc(s.title)}"></button>
-    </article>`).join('')}</div>
+  ${tiles(r)}
   ${extras(r)}
   <div class="ov-end rise" ${r()}>
     <p class="ov-end-t">That's the whole answer, mapped.</p>
-    <div class="ov-end-cta">${ctas}</div>
+    <div class="ov-end-cta">${ctaRow()}</div>
     <p class="keys"><kbd>1</kbd><kbd>2</kbd><kbd>3</kbd>&nbsp;switch views&nbsp;·&nbsp;<kbd>⌘</kbd><kbd>V</kbd>&nbsp;paste a new answer</p>
   </div>`;
-  if (hasSteps) { const h = $('#stepsHost'); h.innerHTML = mdHtml([m.stepList]); enhance(h) }
+  if (m.stepList) { const h = $('#stepsHost'); h.innerHTML = mdHtml([m.stepList]); enhance(h) }
   progress();
 }
+function heroCard(r) {
+  const m = model, OL = 10, ol = m.secs.length > OL ? m.secs.slice(0, OL - 1) : m.secs;
+  const fluff = m.removed.length ? `<details class="fluff"><summary>${icon('scissors')}${plural(m.removed.length, 'filler line')} removed</summary><ul class="fluff-list">${m.removed.map(x => `<li>${esc(x)}</li>`).join('')}</ul></details>` : '';
+  const outline = `<div class="outline"><span class="ol-label">Inside this answer</span><ol>${ol.map(s => `<li><button class="k-${s.kind}" data-open="${s.i}"><i></i><span class="idx">${pad(s.i + 1)}</span><span class="ol-t">${esc(s.title)}</span></button></li>`).join('')}${ol.length < m.secs.length ? `<li><button class="ol-more" data-go="read"><i></i><span class="idx">+${m.secs.length - ol.length}</span><span class="ol-t">more parts</span></button></li>` : ''}</ol></div>`;
+  return `<article class="shell c-hero rise" ${r()}><div class="core hero">
+      <div class="hero-top"><span class="eyebrow">${icon('target')}The gist</span>${fluff}</div>
+      <h1 class="title" id="docTitle" contenteditable="plaintext-only" spellcheck="false" title="Click to rename">${esc(doc.title)}</h1>
+      <p class="tldr">${inl(m.tldrMd)}</p>
+      ${m.context ? `<p class="context">${inl(m.contextMd)}</p>` : m.secs.length > 2 ? outline : ''}
+      <div class="hero-cta">${ctaRow()}</div>
+    </div></article>`;
+}
+const timeCard = (r, hasShape) => `<section class="shell c-time${hasShape ? '' : ' tall'} rise" ${r()}><div class="core time">
+      <span class="eyebrow">${icon('clock')}Time to understand</span>
+      <div class="time-row"><s>${model.readMin} min</s>${icon('arrow-right')}<b>${fmtSec(model.gistSec)}</b></div>
+      <p class="muted">to get the gist of all ${fmt(model.words)} words.</p>
+      <div class="meter"><div class="meter-bar"><i id="exploredBar"></i></div><span id="exploredTxt"></span></div>
+    </div></section>`;
+function shapeCard(r) {
+  const secs = model.secs, total = secs.reduce((n, s) => n + s.words, 0) || 1;
+  const big = secs.reduce((a, s) => s.words > a.words ? s : a, secs[0]);
+  const kinds = {}; secs.forEach(s => kinds[s.kind] = (kinds[s.kind] || 0) + 1);
+  return `<section class="shell c-shape rise" ${r()}><div class="core shape">
+      <span class="eyebrow">${icon('grid')}Shape of the answer</span>
+      <div class="shape-bar">${secs.map((s, j) => `<button class="sg k-${s.kind}" style="flex-grow:${Math.max(s.words, 8)};--j:${j}" data-open="${s.i}" title="${esc(s.title)}" aria-label="Open part ${s.i + 1}: ${esc(s.title)}"></button>`).join('')}</div>
+      <p class="insight">The biggest part is <b>${esc(big.title)}</b>, ${Math.round(big.words / total * 100)}% of the text.</p>
+      <div class="legend">${Object.entries(kinds).map(([k, c]) => `<span class="lg k-${k}"><i></i>${KIND[k].label}${c > 1 ? `<em>×${c}</em>` : ''}</span>`).join('')}</div>
+    </div></section>`;
+}
+const ideasCard = (r, full) => `<section class="shell c-ideas${full ? ' full' : ''} rise" ${r()}><div class="core">
+      <div class="card-head"><span class="eyebrow">${icon('sparkle')}Key ideas</span><span class="hint">Pulled from what the answer put in bold</span></div>
+      <ul class="ideas">${model.ideas.map(k => `<li><button data-open="${k.si}" data-flash="${esc(k.term)}">${k.def != null ? `<span class="term"><mark>${esc(k.term)}</mark></span>${k.def ? `<span class="def">${esc(k.def)}</span>` : ''}` : `<span class="sent">${markIn(k.sent, k.term)}</span>`}<span class="from">${pad(k.si + 1)} · ${esc(model.secs[k.si].title)}</span></button></li>`).join('')}</ul>
+    </div></section>`;
+// steps are filled in after the markup lands, so their ticks share state with every other view
+const stepsCard = (r, full) => `<section class="shell c-steps${full ? ' full' : ''} rise" ${r()}><div class="core">
+      <div class="card-head"><span class="eyebrow">${icon('steps')}Do this</span><span class="hint" id="stepsCount"></span></div>
+      <h3 class="mini-title">${esc(model.stepSec.title)}</h3>
+      <div class="prose compact steps-host" id="stepsHost"></div>
+      <button class="link-btn" data-open="${model.stepSec.i}">Open the full steps${icon('arrow')}</button>
+    </div></section>`;
+function tiles(r) {
+  // long answers get a denser map: even tiles, no previews
+  const secs = model.secs, dense = secs.length > 12, spans = dense ? secs.map(() => 4) : pack(secs);
+  return `<div class="bento tiles${dense ? ' dense' : ''}">${secs.map((s, j) => {
+    const pv = dense ? '' : tilePreview(s);
+    return `
+    <article class="shell tile sp-${spans[j]} k-${s.kind}${doc.seen.includes(s.i) ? ' seen' : ''} rise" ${r()} data-sec="${s.i}">
+      <div class="core">
+        <div class="tile-top"><span class="idx">${pad(s.i + 1)}</span><span class="chip">${icon(KIND[s.kind].ic)}${esc(s.chip)}</span></div>
+        <h3 class="tile-title">${esc(s.title)}</h3>
+        ${s.summary && !(s.derived && pv) ? `<p class="tile-sum">${esc(s.summary)}</p>` : ''}
+        ${pv}
+        <div class="tile-foot"><span>${readLabel(s.words)}</span><span class="seen-tag">${icon('check')}Read</span><span class="bi">${icon('arrow')}</span></div>
+      </div>
+      <button class="tile-hit" data-open="${s.i}" aria-label="Open part ${s.i + 1}: ${esc(s.title)}"></button>
+    </article>`;
+  }).join('')}</div>`;
+}
+// a glimpse of what kind of part it is: the first steps, the bold leads, the table's columns…
+function tilePreview(s) {
+  const T = s.tokens;
+  switch (s.kind) {
+    case 'steps': {
+      const ls = stepsOf(T).items.map(leadOf);
+      return `<ol class="pv-steps">${ls.slice(0, 3).map(l => `<li><span>${esc(l)}</span></li>`).join('')}${ls.length > 3 ? `<li class="more"><span>+${ls.length - 3} more</span></li>` : ''}</ol>`;
+    }
+    case 'breakdown': case 'list': return `<div class="pv-chips">${listLeads(T).slice(0, 5).map(l => `<span>${esc(clip(l, 30))}</span>`).join('')}</div>`;
+    case 'compare': {
+      const tb = T.find(t => t.type === 'table');
+      return `<div class="pv-table">${tableHead(tb).filter(Boolean).slice(0, 4).map(h => `<span>${esc(clip(h, 20))}</span>`).join('')}<em>× ${tb.rows.length}</em></div>`;
+    }
+    case 'code': return `<pre class="pv-code">${esc(T.find(t => t.type === 'code').text.split('\n').slice(0, 3).join('\n'))}</pre>`;
+    case 'proscons': { const {pros, cons} = prosConsItems(T); return `<div class="pv-pc"><span class="pos">+ ${pros.length} for</span><span class="neg">− ${cons.length} against</span></div>` }
+    case 'quote': return `<blockquote class="pv-quote">${esc(clip(blockText(T.find(t => t.type === 'blockquote')), 140))}</blockquote>`;
+    default: return '';
+  }
+}
 function extras(r) {
-  const m = M, out = [];
+  const m = model, out = [];
   if (m.links.length) out.push(`<section class="shell c-extra rise" ${r()}><div class="core"><div class="card-head"><span class="eyebrow">${icon('link')}Links in the answer</span><span class="hint">${m.links.length}</span></div><ul class="rows">${m.links.slice(0, 8).map(l => `<li><a href="${esc(l.href)}" target="_blank" rel="noopener noreferrer"><span class="row-t">${esc(l.text || l.host)}</span><em>${esc(l.host)}</em>${icon('arrow')}</a></li>`).join('')}</ul></div></section>`);
-  if (m.codes.length) out.push(`<section class="shell c-extra rise" ${r()}><div class="core"><div class="card-head"><span class="eyebrow">${icon('code')}Code to copy</span><span class="hint">${m.codes.length} snippet${m.codes.length > 1 ? 's' : ''}</span></div><ul class="rows">${m.codes.map((c, j) => `<li><div class="row"><span class="chip k-code">${esc(c.lang)}</span><span class="row-t">${c.lines} line${c.lines > 1 ? 's' : ''} <small>in ${esc(m.secs[c.si].title)}</small></span><button class="mini-btn" data-act="copy-snippet" data-n="${j}">${icon('copy')}Copy</button></div></li>`).join('')}</ul></div></section>`);
+  if (m.codes.length) out.push(`<section class="shell c-extra rise" ${r()}><div class="core"><div class="card-head"><span class="eyebrow">${icon('code')}Code to copy</span><span class="hint">${plural(m.codes.length, 'snippet')}</span></div><ul class="rows">${m.codes.map((c, j) => `<li><div class="row"><span class="chip k-code">${esc(c.lang)}</span><span class="row-t">${plural(c.lines, 'line')} <small>in ${esc(m.secs[c.si].title)}</small></span><button class="mini-btn" data-act="copy-snippet" data-n="${j}">${icon('copy')}Copy</button></div></li>`).join('')}</ul></div></section>`);
   if (out.length === 1) out[0] = out[0].replace('c-extra', 'c-extra full');
   return out.length ? `<div class="bento extras">${out.join('')}</div>` : '';
 }
 function progress() {
-  if (!M || !D) return;
-  const n = M.secs.length, k = D.seen.filter(i => i < n).length;
+  if (!model || !doc) return;
+  const n = model.secs.length, k = doc.seen.filter(i => i < n).length;
   const bar = $('#exploredBar'); if (bar) bar.style.transform = `scaleX(${n ? k / n : 0})`;
   const t = $('#exploredTxt'); if (t) t.textContent = `${k} of ${n} parts explored`;
   const lis = $$('#stepsHost li[data-key]'), sc = $('#stepsCount');
   if (sc) sc.textContent = `${lis.filter(l => l.classList.contains('done')).length} of ${lis.length} done`;
 }
 function markSeen(i) {
-  if (!D || D.seen.includes(i)) return;
-  D.seen.push(i); saveDoc();
+  if (!doc || doc.seen.includes(i)) return;
+  doc.seen.push(i); saveDoc();
   $(`.tile[data-sec="${i}"]`)?.classList.add('seen');
   progress();
 }
@@ -1635,6 +1705,8 @@ function units(tokens) {
   return out;
 }
 // a lead-in never ends a page: headings, bold labels and lines ending in ":" travel with what follows
+// a page less than this full gets roomier type instead of a big empty gap
+const ROOMY = .42;
 const leadIn = t => t.type === 'heading' || isPseudo(t) || (t.type === 'paragraph' && /:\s*$/.test(t.raw));
 function groups(tokens) {
   const out = []; let hold = [];
@@ -1667,58 +1739,58 @@ function paginate(tokens, body) {
   return pages.length ? pages : [{toks: [], fill: 0, w: 0}];
 }
 function cardInner(c) {
-  if (c.t === 'gist') return `<span class="eyebrow">${icon('target')}The gist</span><h2 class="card-title xl">${esc(D.title)}</h2><p class="card-lead">${inl(M.tldrMd)}</p>
-    <div class="card-stats"><span><b>${M.secs.length}</b> parts</span><span><b>${M.ideas.length}</b> key ideas</span><span><b>${C.length - 2}</b> cards</span></div>
+  if (c.t === 'gist') return `<span class="eyebrow">${icon('target')}The gist</span><h2 class="card-title xl">${esc(doc.title)}</h2><p class="card-lead">${inl(model.tldrMd)}</p>
+    <div class="card-stats"><span><b>${model.secs.length}</b> parts</span><span><b>${model.ideas.length}</b> key ideas</span><span><b>${deck.length - 2}</b> cards</span></div>
     <p class="card-hint">Swipe, tap the right side, or press → to start.</p>`;
   if (c.t === 'recap') return `<span class="eyebrow">${icon('check')}Recap</span><h2 class="card-title">You've got the gist.</h2>
-    <ul class="recap">${M.ideas.slice(0, 5).map(k => `<li>${icon('check')}<span>${esc(k.def != null ? k.term : clip(k.sent, 90))}</span></li>`).join('')}</ul>
+    <ul class="recap">${model.ideas.slice(0, 5).map(k => `<li>${icon('check')}<span>${esc(k.def != null ? k.term : clip(k.sent, 90))}</span></li>`).join('')}</ul>
     <div class="card-cta"><button class="btn" data-act="share">Share it<span class="bi">${icon('share')}</span></button><button class="btn ghost plain" data-go="read">Read in full</button></div>`;
   const s = c.s;
-  return `<div class="card-top"><span class="idx">${pad(s.i + 1)} / ${pad(M.secs.length)}</span><span class="chip k-${s.kind}">${icon(KIND[s.kind].ic)}${esc(s.chip)}</span></div>
+  return `<div class="card-top"><span class="idx">${pad(s.i + 1)} / ${pad(model.secs.length)}</span><span class="chip k-${s.kind}">${icon(KIND[s.kind].ic)}${esc(s.chip)}</span></div>
     <h2 class="card-title">${esc(s.title)}${c.of > 1 ? ` <em>${c.n + 1}/${c.of}</em>` : ''}</h2>
-    <div class="card-body prose compact${c.fill < .42 ? ' roomy' : ''}"></div>`;
+    <div class="card-body prose compact${c.fill < ROOMY ? ' roomy' : ''}"></div>`;
 }
 const fillBodies = (root, sel, list) => $$(sel, root).forEach((b, n) => {
   b.innerHTML = mdHtml(list[n]); enhance(b);
-  b.classList.toggle('scrolls', b.scrollHeight > b.clientHeight + 4); // one piece taller than the page: hint that it scrolls
+  b.classList.toggle('scrolls', overflows(b)); // one piece taller than the page: hint that it scrolls
 });
 // built lazily: pages can only be measured while the deck is on screen
 function renderCards() {
   const v = $('#v-cards');
   v.innerHTML = `<div class="deck-wrap"><div class="deck" id="deck"><article class="card measure" aria-hidden="true"><div class="shell"><div class="core"><div class="card-top"><span class="idx">00</span><span class="chip">${icon('list')}0</span></div><h2 class="card-title"></h2><div class="card-body prose compact"></div></div></div></article></div></div>`;
   const mc = $('.card.measure', v), mt = $('.card-title', mc), mb = $('.card-body', mc);
-  C = [{t: 'gist'}];
-  M.secs.forEach(s => {
+  deck = [{t: 'gist'}];
+  model.secs.forEach(s => {
     mt.innerHTML = `${esc(s.title)} <em>1/2</em>`;
     const pages = paginate(s.tokens, mb);
-    pages.forEach((p, n) => C.push({t: 'sec', s, n, of: pages.length, tokens: p.toks, fill: p.fill}));
+    pages.forEach((p, n) => deck.push({t: 'sec', s, n, of: pages.length, tokens: p.toks, fill: p.fill}));
   });
-  C.push({t: 'recap'});
+  deck.push({t: 'recap'});
   v.innerHTML = `<div class="deck-wrap">
-    <div class="deck-bar" aria-hidden="true" style="gap:${C.length > 24 ? 1 : 4}px">${C.map(() => '<i></i>').join('')}</div>
-    <div class="deck" id="deck">${C.map((c, j) => `<article class="card" data-j="${j}"><div class="shell"><div class="core">${cardInner(c)}</div></div></article>`).join('')}</div>
+    <div class="deck-bar" aria-hidden="true" style="gap:${deck.length > 24 ? 1 : 4}px">${deck.map(() => '<i></i>').join('')}</div>
+    <div class="deck" id="deck">${deck.map((c, j) => `<article class="card" data-j="${j}"><div class="shell"><div class="core">${cardInner(c)}</div></div></article>`).join('')}</div>
     <div class="deck-nav"><button class="nav-round" data-act="prev" aria-label="Previous card">${icon('left')}</button><span class="deck-count" id="deckCount" aria-live="polite"></span><button class="nav-round" data-act="next" aria-label="Next card">${icon('right')}</button><button class="nav-round" data-act="img-card" aria-label="Save this card as an image" title="Save as image">${icon('image')}</button></div>
   </div>`;
-  fillBodies(v, '.card-body', C.filter(c => c.t === 'sec').map(c => c.tokens));
+  fillBodies(v, '.card-body', deck.filter(c => c.t === 'sec').map(c => c.tokens));
   renderCards.size = deckSize();
-  setCard(ci);
+  setCard(cardIdx);
 }
 const deckSize = () => { const d = $('#deck'); return d ? `${d.clientWidth}x${d.clientHeight}` : '' };
 function setCard(j) {
-  if (!C.length) return;
-  ci = Math.max(0, Math.min(C.length - 1, j));
-  $$('#deck .card').forEach((el, k) => { const p = k - ci; el.dataset.pos = p < 0 ? 'gone' : p > 3 ? 'far' : String(p); el.inert = p !== 0 });
-  $$('.deck-bar i').forEach((b, k) => b.classList.toggle('on', k <= ci));
-  $('#deckCount').textContent = `${ci + 1} / ${C.length}`;
-  $('[data-act="prev"]', $('#v-cards')).disabled = ci === 0;
-  $('[data-act="next"]', $('#v-cards')).disabled = ci === C.length - 1;
-  if (C[ci].t === 'sec') markSeen(C[ci].s.i);
+  if (!deck.length) return;
+  cardIdx = Math.max(0, Math.min(deck.length - 1, j));
+  $$('#deck .card').forEach((el, k) => { const p = k - cardIdx; el.dataset.pos = p < 0 ? 'gone' : p > 3 ? 'far' : String(p); el.inert = p !== 0 });
+  $$('.deck-bar i').forEach((b, k) => b.classList.toggle('on', k <= cardIdx));
+  $('#deckCount').textContent = `${cardIdx + 1} / ${deck.length}`;
+  $('[data-act="prev"]', $('#v-cards')).disabled = cardIdx === 0;
+  $('[data-act="next"]', $('#v-cards')).disabled = cardIdx === deck.length - 1;
+  if (deck[cardIdx].t === 'sec') markSeen(deck[cardIdx].s.i);
 }
 
 /* ============ read ============ */
 function renderRead() {
-  const v = $('#v-read'), m = M;
-  let skim = false; try { skim = localStorage.getItem('unwall.skim') === '1' } catch {}
+  const v = $('#v-read'), m = model;
+  const skim = pref.get('skim') === '1';
   v.innerHTML = `<div class="read-progress" aria-hidden="true"></div>
   <div class="read">
     <aside class="toc" aria-label="Contents"><span class="eyebrow">${icon('read')}Contents</span>
@@ -1726,7 +1798,7 @@ function renderRead() {
     <article class="read-main${skim ? ' skim' : ''}" id="readMain">
       <header class="read-head">
         <span class="eyebrow">${icon('clock')}${m.readMin} min read · ${fmt(m.words)} words</span>
-        <h1 class="read-title">${esc(D.title)}</h1>
+        <h1 class="read-title">${esc(doc.title)}</h1>
         <div class="read-tools">
           <button class="toggle" id="skimBtn" data-act="skim" aria-pressed="${skim}">${icon('eye')}<span>Skim mode</span><i class="sw" aria-hidden="true"></i></button>
           <button class="tool" data-act="fold">${icon('fold')}<span>Collapse all</span></button>
@@ -1751,17 +1823,20 @@ function toggleSkim() {
   const m = $('#readMain'); if (!m) return;
   const on = !m.classList.contains('skim');
   m.classList.toggle('skim', on); $('#skimBtn').setAttribute('aria-pressed', String(on));
-  try { localStorage.setItem('unwall.skim', on ? '1' : '') } catch {}
+  pref.set('skim', on ? '1' : '');
 }
 
 /* ============ story: shared links open as a full-screen, tap-through telling of the whole answer ============ */
+// full-screen overlays shut off what's behind them; the library keeps .island live for its own toggle button
+const inertBehind = (sels, on) => sels.forEach(s => $(s).inert = on);
+const STORY_BEHIND = ['#app', '#dock', '.island'], LIB_BEHIND = ['#app', '#dock'];
 const ST = {i: 0, durs: [], bars: [], t: 0, last: 0, raf: 0, paused: false, held: false, press: null};
 function storySlides() {
-  const m = M, box = $('#stSlides'), out = [];
+  const m = model, box = $('#stSlides'), out = [];
   out.push({k: 'summary', w: words(m.tldr) + 12, html: `<span class="eyebrow">${icon('sparkle')}Unwalled · ${m.readMin} min → ${fmtSec(m.gistSec)}</span>
-    <h1 class="st-h">${esc(D.title)}</h1><p class="st-tldr">${inl(m.tldrMd)}</p>
+    <h1 class="st-h">${esc(doc.title)}</h1><p class="st-tldr">${inl(m.tldrMd)}</p>
     ${m.secs.length > 1 ? `<div class="st-shape">${m.secs.map(s => `<i class="k-${s.kind}" style="flex-grow:${Math.max(s.words, 8)}"></i>`).join('')}</div>` : ''}
-    <p class="st-meta"${m.secs.length > 1 ? '' : ' style="margin-top:auto"'}><span>${fmt(m.words)} words · ${m.secs.length} part${m.secs.length > 1 ? 's' : ''}</span><span class="st-tap">Tap to start${icon('arrow-right')}</span></p>`});
+    <p class="st-meta"${m.secs.length > 1 ? '' : ' style="margin-top:auto"'}><span>${fmt(m.words)} words · ${plural(m.secs.length, 'part')}</span><span class="st-tap">Tap to start${icon('arrow-right')}</span></p>`});
   // pages are measured in a hidden slide shaped like the real ones
   box.innerHTML = `<section class="st-slide measure" aria-hidden="true"><div class="st-head"><span class="idx">00</span><span class="chip">${icon('list')}0</span></div><h2 class="st-title"></h2><div class="st-body prose"></div></section>`;
   const ms = box.firstElementChild, mt = $('.st-title', ms), mb = $('.st-body', ms);
@@ -1769,7 +1844,7 @@ function storySlides() {
     mt.innerHTML = `${esc(s.title)} <em>1/2</em>`;
     const pages = paginate(s.tokens, mb);
     pages.forEach((p, n) => out.push({k: s.kind, si: s.i, toks: p.toks, w: p.w + (n ? 0 : words(s.title)), html: `<div class="st-head"><span class="idx">${pad(s.i + 1)} / ${pad(m.secs.length)}</span><span class="chip">${icon(KIND[s.kind].ic)}${esc(s.chip)}</span></div>
-      <h2 class="st-title${n ? ' sm' : ''}">${esc(s.title)}${pages.length > 1 ? ` <em>${n + 1}/${pages.length}</em>` : ''}</h2><div class="st-body prose${p.fill < .42 ? ' roomy' : ''}"></div>`}));
+      <h2 class="st-title${n ? ' sm' : ''}">${esc(s.title)}${pages.length > 1 ? ` <em>${n + 1}/${pages.length}</em>` : ''}</h2><div class="st-body prose${p.fill < ROOMY ? ' roomy' : ''}"></div>`}));
   });
   if (m.ideas.length >= 3) out.push({k: 'quote', w: words(m.ideas.map(k => k.term + ' ' + (k.def || k.sent || '')).join(' ')), html: `<span class="eyebrow">${icon('sparkle')}Key ideas</span>
     <h2 class="st-title">${m.ideas.length} things to remember</h2>
@@ -1780,7 +1855,7 @@ function storySlides() {
   return out;
 }
 function openStory(fromSec) {
-  if (!M || !D) return;
+  if (!model || !doc) return;
   closeDialog($('#share'));
   const st = $('#story'), box = $('#stSlides');
   st.hidden = false; // visible (still transparent) so pages can be measured
@@ -1792,7 +1867,7 @@ function openStory(fromSec) {
   $('#stBar').innerHTML = slides.map(() => '<i><b></b></i>').join('');
   ST.bars = $$('#stBar b');
   $('#stBar').style.gap = slides.length > 30 ? '1px' : '3px';
-  ['#app', '#dock', '.island'].forEach(s => $(s).inert = true);
+  inertBehind(STORY_BEHIND, true);
   document.documentElement.style.overflow = 'hidden';
   requestAnimationFrame(() => st.classList.add('open'));
   stPause(false);
@@ -1803,7 +1878,7 @@ function openStory(fromSec) {
 function closeStory() {
   const st = $('#story'); if (st.hidden) return;
   cancelAnimationFrame(ST.raf); st.classList.remove('open');
-  ['#app', '#dock', '.island'].forEach(s => $(s).inert = false);
+  inertBehind(STORY_BEHIND, false);
   document.documentElement.style.overflow = '';
   setTimeout(() => { if (!st.classList.contains('open')) { st.hidden = true; $('#stSlides').replaceChildren() } }, 420);
 }
@@ -1832,15 +1907,15 @@ function stPause(on) {
 
 /* ============ focus sheet ============ */
 function openSection(i, flash) {
-  const s = M?.secs[i]; if (!s) return;
-  fi = i;
+  const s = model?.secs[i]; if (!s) return;
+  focusIdx = i;
   const dlg = $('#focus'), b = $('#fBody');
   dlg.className = `sheet k-${s.kind}`;
-  $('#fIdx').textContent = `${pad(i + 1)} / ${pad(M.secs.length)}`;
+  $('#fIdx').textContent = `${pad(i + 1)} / ${pad(model.secs.length)}`;
   $('#fChip').innerHTML = icon(KIND[s.kind].ic) + esc(s.chip);
   $('#fTitle').textContent = s.title;
   b.innerHTML = mdHtml(s.tokens); enhance(b, true); b.scrollTop = 0;
-  const p = M.secs[i - 1], n = M.secs[i + 1];
+  const p = model.secs[i - 1], n = model.secs[i + 1];
   $('#fPrev').textContent = p ? p.title : '—'; $('#fPrevBtn').disabled = !p;
   $('#fNext').textContent = n ? n.title : '—'; $('#fNextBtn').disabled = !n;
   if (!dlg.open) dlg.showModal();
@@ -1875,27 +1950,28 @@ function renderRecent() {
   $('#recent').hidden = !docs.length;
   $('#recentList').innerHTML = docs.map(d => `<li><button class="recent-item" data-id="${d.id}"><span class="recent-t">${esc(d.title)}</span><span class="recent-m">${ago(d.opened || d.created)} · ${d.read} min → ${fmtSec(d.gist)}</span></button></li>`).join('');
 }
+const refreshLibrary = () => { renderLibrary($('#libQ').value); renderRecent() };
 function openLibrary() {
   const lib = $('#lib');
   renderLibrary($('#libQ').value);
   lib.hidden = false;
   requestAnimationFrame(() => requestAnimationFrame(() => lib.classList.add('open')));
   $('#btnLib').setAttribute('aria-expanded', 'true');
-  $('#app').inert = true; $('#dock').inert = true;
+  inertBehind(LIB_BEHIND, true);
   if (matchMedia('(pointer:fine)').matches) setTimeout(() => $('#libQ').focus(), 60);
 }
 function closeLibrary() {
   const lib = $('#lib'); if (lib.hidden) return;
   lib.classList.remove('open');
   $('#btnLib').setAttribute('aria-expanded', 'false');
-  $('#app').inert = false; $('#dock').inert = false;
+  inertBehind(LIB_BEHIND, false);
   setTimeout(() => { if (!lib.classList.contains('open')) lib.hidden = true }, 520);
 }
 function delDoc(id) {
   const docs = loadDocs(), n = docs.findIndex(d => d.id === id); if (n < 0) return;
-  const [gone] = docs.splice(n, 1); saveDocs(docs); renderLibrary($('#libQ').value); renderRecent();
-  if (D?.id === id) D.temp = true;
-  toast('Deleted from your library', 'Undo', () => { const ds = loadDocs(); ds.splice(n, 0, gone); saveDocs(ds); if (D?.id === id) delete D.temp; renderLibrary($('#libQ').value); renderRecent() });
+  const [gone] = docs.splice(n, 1); saveDocs(docs); refreshLibrary();
+  if (doc?.id === id) doc.temp = true;
+  toast('Deleted from your library', 'Undo', () => { const ds = loadDocs(); ds.splice(n, 0, gone); saveDocs(ds); if (doc?.id === id) delete doc.temp; refreshLibrary() });
 }
 function exportLibrary() {
   const docs = loadDocs();
@@ -1906,13 +1982,13 @@ function exportLibrary() {
 // backups and .md files both come from outside, so every field is re-derived or type-checked
 function docFrom(x) {
   if (typeof x?.md !== 'string') return null;
-  const md = normalize(x.md); if (words(md) < 25) return null;
+  const md = normalize(x.md); if (words(md) < MIN_WORDS) return null;
   const m = analyze(md), ts = v => Number.isFinite(v) ? v : Date.now();
   const d = {id: hash(md), md, title: typeof x.title === 'string' && x.title.trim() ? x.title.trim().slice(0, 300) : m.title,
     created: ts(x.created), opened: ts(x.opened ?? x.created),
     checks: Object.fromEntries(Object.entries(x.checks && typeof x.checks === 'object' ? x.checks : {}).filter(([, v]) => v === true)),
-    seen: Array.isArray(x.seen) ? x.seen.filter(Number.isInteger) : [], read: m.readMin, gist: m.gistSec, nsec: m.secs.length};
-  if (['overview', 'cards', 'read'].includes(x.mode)) d.mode = x.mode;
+    seen: Array.isArray(x.seen) ? x.seen.filter(Number.isInteger) : [], ...docStats(m)};
+  if (MODES.includes(x.mode)) d.mode = x.mode;
   return d;
 }
 async function importFiles(files) {
@@ -1933,8 +2009,8 @@ async function importFiles(files) {
       else { have.add(d.id); docs.push(d); added++ }
     }
   }
-  if (added) { docs.sort((a, b) => b.opened - a.opened); saveDocs(docs); renderLibrary($('#libQ').value); renderRecent() }
-  toast([`Added ${added} answer${added === 1 ? '' : 's'}`, dup && `${dup} already saved`, bad && `${bad} skipped (empty or unreadable)`].filter(Boolean).join(' · '));
+  if (added) { docs.sort((a, b) => b.opened - a.opened); saveDocs(docs); refreshLibrary() }
+  toast([`Added ${plural(added, 'answer')}`, dup && `${dup} already saved`, bad && `${bad} skipped (empty or unreadable)`].filter(Boolean).join(' · '));
 }
 
 /* ============ share ============ */
@@ -1945,6 +2021,8 @@ const deflate = async s => new Uint8Array(await new Response(new Blob([s]).strea
 const MAX_MD = 1 << 20;
 const inflate = b => { let n = 0; return new Response(new Blob([b]).stream().pipeThrough(new DecompressionStream('deflate-raw')).pipeThrough(new TransformStream({transform(c, q) { if ((n += c.length) > MAX_MD) throw new RangeError('link too large'); q.enqueue(c) }}))).text() };
 const appURL = () => location.href.split('#')[0];
+// a link's payload is read once, then dropped so a reload or a copied URL doesn't replay it
+const clearHash = () => history.replaceState(null, '', location.pathname + location.search);
 // fallback link: the whole answer rides in the URL fragment, no server involved, but it runs to thousands of characters
 const packLink = async md => appURL() + '#d=' + b64u(await deflate(md));
 const unpackLink = s => inflate(unb64(s));
@@ -1972,26 +2050,26 @@ const topic = s => {
   for (const w of String(s).normalize('NFKD').replace(/[̀-ͯ]/g, '').toLowerCase().split(/[^a-z0-9]+/).filter(Boolean)) { if (out && out.length + w.length >= 42) break; out += (out ? '-' : '') + w }
   return out.slice(0, 42) || 'answer';
 };
-const shortURL = () => `${appURL()}#${topic(D.title)}~${D.ls}`;
+const shortURL = () => `${appURL()}#${topic(doc.title)}~${doc.ls}`;
 // one upload per answer, on the click; the secret is kept so sharing again reuses the same link
 async function linkFor() {
-  if (D.ls) return shortURL();
+  if (doc.ls) return shortURL();
   try {
-    const secret = crypto.getRandomValues(new Uint8Array(10)), {id, body} = await seal(D.md, secret);
+    const secret = crypto.getRandomValues(new Uint8Array(10)), {id, body} = await seal(doc.md, secret);
     const r = await fetch(`/api/s?id=${id}`, {method: 'POST', body, signal: AbortSignal.timeout(6000)});
-    if (r.ok) { D.ls = b64u(secret); saveDoc(); return shortURL() }
+    if (r.ok) { doc.ls = b64u(secret); saveDoc(); return shortURL() }
   } catch {}
-  return shareURL || packLink(D.md);
+  return shareURL || packLink(doc.md);
 }
 async function openShare() {
-  if (!D) return;
+  if (!doc) return;
   const d = $('#share'), note = $('#shareNote');
   shareURL = ''; $('#shareLink').disabled = framed;
   $('#shareNative').hidden = framed || !navigator.share;
-  note.textContent = framed ? 'Story links work once the app is hosted on its own page. In this preview, copy the TL;DR instead.' : D.ls ? shortURL().replace(/^https?:\/\//, '') : '';
+  note.textContent = framed ? 'Story links work once the app is hosted on its own page. In this preview, copy the TL;DR instead.' : doc.ls ? shortURL().replace(/^https?:\/\//, '') : '';
   if (!d.open) d.showModal();
   if (framed) return;
-  try { shareURL = await packLink(D.md) } catch { if (!D.ls) { $('#shareLink').disabled = true; note.textContent = 'This browser cannot make links. Copy the TL;DR instead.' } }
+  try { shareURL = await packLink(doc.md) } catch { if (!doc.ls) { $('#shareLink').disabled = true; note.textContent = 'This browser cannot make links. Copy the TL;DR instead.' } }
 }
 async function shareLink() {
   const p = linkFor();
@@ -1999,7 +2077,7 @@ async function shareLink() {
   const u = await p;
   $('#shareNote').textContent = u.includes('#d=') ? `The short-link service is not reachable, so this is a long link (${fmt(u.length)} characters).${u.length > 8000 ? ' Some chat apps cut links this long.' : ''}` : u.replace(/^https?:\/\//, '');
 }
-const tldrText = () => [D.title, '', `TL;DR: ${M.tldr}`, '', 'Key ideas:', ...M.ideas.map(k => `• ${k.def != null ? k.term + (k.def ? ` — ${k.def}` : '') : k.sent}`)].join('\n');
+const tldrText = () => [doc.title, '', `TL;DR: ${model.tldr}`, '', 'Key ideas:', ...model.ideas.map(k => `• ${k.def != null ? k.term + (k.def ? ` — ${k.def}` : '') : k.sent}`)].join('\n');
 async function copyText(text, msg) {
   try { await navigator.clipboard.writeText(text) } catch {
     const ta = Object.assign(document.createElement('textarea'), {value: text});
@@ -2019,7 +2097,7 @@ async function copyLater(p, msg) {
 async function openShared(text, ls) {
   text = normalize(text);
   const m = analyze(text), id = hash(text), have = loadDocs().find(d => d.id === id);
-  const d = have || {id, md: text, title: m.title, checks: {}, seen: [], temp: true, created: Date.now(), opened: Date.now(), read: m.readMin, gist: m.gistSec, nsec: m.secs.length};
+  const d = have || {id, md: text, title: m.title, checks: {}, seen: [], temp: true, created: Date.now(), opened: Date.now(), ...docStats(m)};
   if (ls) d.ls ||= ls;
   await openDoc(d, m, true);
   saveDoc();
@@ -2027,12 +2105,12 @@ async function openShared(text, ls) {
 }
 async function openFromHash() {
   const s = location.hash.slice(3);
-  history.replaceState(null, '', location.pathname + location.search);
+  clearHash();
   let text; try { text = await unpackLink(s) } catch { return toast('That link is incomplete or damaged.') }
   openShared(text);
 }
 async function openFromShort(s) {
-  history.replaceState(null, '', location.pathname + location.search);
+  clearHash();
   let text;
   try {
     const secret = unb64(s), r = await fetch(`/api/s?id=${(await keysOf(secret)).id}`);
@@ -2065,7 +2143,7 @@ const bookmarklet = () => 'javascript:' + encodeURIComponent(`(${grabAnswer})(${
 const MAX_ADD = 200 * 1024;
 function openFromBookmarklet() {
   const s = location.hash.slice(5);
-  history.replaceState(null, '', location.pathname + location.search);
+  clearHash();
   if (s.length * .75 > MAX_ADD) return toast('That answer is too long to add from a link. Copy it and paste it here instead.');
   let html; try { html = new TextDecoder().decode(unb64(s)) } catch { return toast('That link is incomplete or damaged.') }
   ingest(htmlToMd(html));
@@ -2073,7 +2151,6 @@ function openFromBookmarklet() {
 
 /* ============ image cards: drawn on canvas, nothing leaves the device ============ */
 const FORMATS = {square: [1080, 1080], portrait: [1080, 1350], story: [1080, 1920], wide: [1600, 900]};
-const KCOL = {summary: 'y', steps: 'g', compare: 'b', quote: 'p', breakdown: 'o', list: 'o', code: 'v', proscons: 'm', prose: 'n'};
 const FAM = {d: '"Bricolage Grotesque", system-ui, sans-serif', u: 'Geist, system-ui, sans-serif', r: 'Newsreader, Georgia, serif', m: '"Geist Mono", ui-monospace, monospace'};
 const TAGLINE = 'Paste the wall. Get the gist.';
 const IMG = {type: 'gist', si: 0, format: 'square', theme: 'light', blob: null, url: ''};
@@ -2155,10 +2232,10 @@ function logo(ctx, x, y, s, P) {
 }
 // the "shape of the answer" bar doubles as a fingerprint on every card; hi = part to emphasise
 function shapeBar(ctx, P, x, y, w, h, hi) {
-  const g = h * .4, wt = M.secs.map(s => Math.max(s.words, 8)), sum = wt.reduce((a, b) => a + b, 0) || 1, free = w - g * (M.secs.length - 1);
+  const g = h * .4, wt = model.secs.map(s => Math.max(s.words, 8)), sum = wt.reduce((a, b) => a + b, 0) || 1, free = w - g * (model.secs.length - 1);
   let cx = x;
-  M.secs.forEach((s, i) => {
-    const sw = free * wt[i] / sum, k = KCOL[s.kind];
+  model.secs.forEach((s, i) => {
+    const sw = free * wt[i] / sum, k = KIND[s.kind].col;
     ctx.globalAlpha = hi != null && hi !== i ? .22 : P.dark ? .82 : 1;
     ctx.fillStyle = P.dark ? P[`${k}-ink`] : P[k]; rr(ctx, cx, y, Math.max(sw, 2), h, h / 2); ctx.fill();
     cx += sw + g;
@@ -2181,10 +2258,10 @@ function ideaLines(ctx, P, k, w, S) {
     runs = i < 0 ? [{t: k.sent, f: reg, c: P['ink-2']}] : [{t: k.sent.slice(0, i), f: reg, c: P['ink-2']}, {t: k.term, f: bold, c: P.ink, mark: true}, {t: k.sent.slice(i + k.term.length), f: reg, c: P['ink-2']}];
   }
   const lines = wrap(ctx, runs.filter(r => r.t), w, 3), lh = fs * 1.42;
-  return {lines, lh, h: lines.length * lh, kind: M.secs[k.si]?.kind || 'prose'};
+  return {lines, lh, h: lines.length * lh, kind: model.secs[k.si]?.kind || 'prose'};
 }
 function stat(ctx, P, right, mid, S) {
-  const fs = 21 * S, a = `${M.readMin} min`, b = ` → ${fmtSec(M.gistSec)}`;
+  const fs = 21 * S, a = `${model.readMin} min`, b = ` → ${fmtSec(model.gistSec)}`;
   useFont(ctx, F('m', 500, fs));
   const wa = ctx.measureText(a).width, wb = ctx.measureText(b).width, x = right - wa - wb, base = mid + fs * .36;
   ctx.fillStyle = P['ink-4']; ctx.fillText(a, x, base); ctx.fillRect(x, base - fs * .33, wa, Math.max(2, 2 * S));
@@ -2193,15 +2270,15 @@ function stat(ctx, P, right, mid, S) {
 function layoutGist(ctx, P, b, o) {
   const wide = o.format === 'wide', story = o.format === 'story', gapC = 72;
   const lw = wide ? (b.w - gapC) * .54 : b.w, rw = wide ? b.w - gapC - lw : b.w;
-  const kMin = Math.min(M.ideas.length, o.format === 'square' || wide ? 2 : 3);
+  const kMin = Math.min(model.ideas.length, o.format === 'square' || wide ? 2 : 3);
   let L;
   // bigger type only if every key idea fits; otherwise shrink until at least kMin fit
   for (const [s0, all] of [[1.24, 1], [1.12, 1], [1, 0], [.93, 0], [.86, 0], [.8, 0], [.74, 0], [.68, 0]]) {
     const S = s0 * (story ? 1.12 : 1);
-    const title = balanced(ctx, [{t: D.title, f: F('d', 750, 74 * S, -.045), c: P.ink}], lw, 4), tLH = 74 * S * .98;
-    const tldr = wrap(ctx, [{t: M.tldr, f: F('r', 400, 34 * S), c: P.ink}], lw, story ? 13 : 10), dLH = 34 * S * 1.45;
+    const title = balanced(ctx, [{t: doc.title, f: F('d', 750, 74 * S, -.045), c: P.ink}], lw, 4), tLH = 74 * S * .98;
+    const tldr = wrap(ctx, [{t: model.tldr, f: F('r', 400, 34 * S), c: P.ink}], lw, story ? 13 : 10), dLH = 34 * S * 1.45;
     const headH = 76 * S, leftH = headH + title.length * tLH + 28 * S + tldr.length * dLH;
-    const ideas = M.ideas.map(k => ideaLines(ctx, P, k, rw - 34 * S, S)), labelH = 46 * S;
+    const ideas = model.ideas.map(k => ideaLines(ctx, P, k, rw - 34 * S, S)), labelH = 46 * S;
     const used = n => n ? labelH + ideas.slice(0, n).reduce((a, x) => a + x.h + 20 * S, 0) - 20 * S : 0;
     const avail = wide ? b.h : b.h - leftH - 48 * S;
     let n = ideas.length; while (n && used(n) > avail) n--;
@@ -2223,7 +2300,7 @@ function layoutGist(ctx, P, b, o) {
   useFont(ctx, F('u', 600, 18 * S, .16)); ctx.fillStyle = P['ink-3']; ctx.fillText('KEY IDEAS', x, y + 24 * S);
   y += L.labelH;
   for (const it of L.ideas) {
-    ctx.fillStyle = P[`${KCOL[it.kind]}-ink`]; rr(ctx, x + 2 * S, y + it.lh / 2 - 7 * S, 14 * S, 14 * S, 4 * S); ctx.fill();
+    ctx.fillStyle = P[`${KIND[it.kind].col}-ink`]; rr(ctx, x + 2 * S, y + it.lh / 2 - 7 * S, 14 * S, 14 * S, 4 * S); ctx.fill();
     drawText(ctx, it.lines, x + 34 * S, y, it.lh, P);
     y += it.h + 20 * S;
   }
@@ -2236,18 +2313,14 @@ function bodyModel(s) {
   });
   const text = () => ({type: 'text', text: T.filter(t => !['code', 'table', 'heading'].includes(t.type)).map(blockText).join(' ')});
   switch (s.kind) {
-    case 'steps': return {type: 'list', numbered: true, items: items(lists.find(l => l.ordered) || lists[0])};
+    case 'steps': return {type: 'list', numbered: true, items: items(stepsOf(T))};
     case 'breakdown': case 'list': return {type: 'list', items: lists.flatMap(items)};
-    case 'compare': { const tb = T.find(t => t.type === 'table'); return {type: 'table', head: tb.header.map(c => plain(c.tokens).trim()), rows: tb.rows.map(r => r.map(c => plain(c.tokens).trim()))} }
+    case 'compare': { const tb = T.find(t => t.type === 'table'); return {type: 'table', head: tableHead(tb), rows: tb.rows.map(r => r.map(c => plain(c.tokens).trim()))} }
     case 'code': { const cs = T.filter(t => t.type === 'code'); return {type: 'code', lang: cs[0].lang || 'code', lines: cs[0].text.split('\n'), extra: cs.length - 1} }
     case 'quote': { const qs = T.filter(t => t.type === 'blockquote'); return {type: 'quote', text: blockText(qs[0]), extra: qs.length - 1} }
     case 'proscons': {
-      let mode = ''; const pros = [], cons = [];
-      for (const t of T) {
-        if (t.type === 'heading' || isPseudo(t)) { const x = blockText(t); mode = PROS_RX.test(x) ? 'p' : CONS_RX.test(x) ? 'c' : mode }
-        else if (t.type === 'list' && mode) (mode === 'p' ? pros : cons).push(...t.items.map(it => plain(itemInline(it))));
-      }
-      return pros.length || cons.length ? {type: 'pc', pros, cons} : text();
+      const {pros, cons} = prosConsItems(T), txt = it => plain(itemInline(it));
+      return pros.length || cons.length ? {type: 'pc', pros: pros.map(txt), cons: cons.map(txt)} : text();
     }
     default: return text();
   }
@@ -2320,11 +2393,11 @@ function planCode(ctx, P, B, w, avail, S) {
   const fits = hOf(n) <= avail;
   return {h: hOf(n), ok: fits && n >= Math.min(6, lines.length), full: fits && n === lines.length, draw(x, y) {
     const h = hOf(n) - (B.extra ? 50 * S : 0), mid = y + headH / 2 + 18 * S * .36;
-    if (B.extra) more(ctx, P, x, y + h + 40 * S, S, `+${B.extra} more snippet${B.extra > 1 ? 's' : ''} in the full answer`);
+    if (B.extra) more(ctx, P, x, y + h + 40 * S, S, `+${plural(B.extra, 'more snippet')} in the full answer`);
     rr(ctx, x, y, w, h, 20 * S); ctx.fillStyle = P.bg; ctx.fill(); ctx.strokeStyle = P.line; ctx.lineWidth = 2; ctx.stroke();
     useFont(ctx, F('m', 600, 18 * S)); ctx.fillStyle = P['v-ink']; ctx.fillText(B.lang, x + pd, mid);
     const lw = ctx.measureText(B.lang).width;
-    useFont(ctx, F('m', 500, 18 * S)); ctx.fillStyle = P['ink-3']; ctx.fillText(`${lines.length} line${lines.length > 1 ? 's' : ''}`, x + pd + lw + 18 * S, mid);
+    useFont(ctx, F('m', 500, 18 * S)); ctx.fillStyle = P['ink-3']; ctx.fillText(`${plural(lines.length, 'line')}`, x + pd + lw + 18 * S, mid);
     ctx.fillStyle = P.line; ctx.fillRect(x, y + headH, w, 2);
     ctx.save(); ctx.beginPath(); ctx.rect(x + pd, y + headH, w - pd * 2, h - headH); ctx.clip();
     useFont(ctx, F('m', 400, fs));
@@ -2370,18 +2443,18 @@ function planProse(ctx, P, B, w, avail, S, kc, ki) {
   return {h: n * lh + moreH, ok: fits && n >= Math.min(4, all.length), full: fits && n === all.length, draw(x, y) {
     if (q) { ctx.fillStyle = ki; rr(ctx, x, y + 4 * S, 5 * S, n * lh - 8 * S, 3 * S); ctx.fill() }
     drawText(ctx, lines, x + ind, y, lh, P);
-    if (B.extra) more(ctx, P, x, y + n * lh + 40 * S, S, `+${B.extra} more quote${B.extra > 1 ? 's' : ''} in the full answer`);
+    if (B.extra) more(ctx, P, x, y + n * lh + 40 * S, S, `+${plural(B.extra, 'more quote')} in the full answer`);
   }};
 }
 const planBody = (ctx, P, B, w, avail, S, kc, ki) => ({list: planList, table: planTable, code: planCode, pc: planPC}[B.type] || planProse)(ctx, P, B, w, avail, S, kc, ki);
 function layoutSection(ctx, P, b, o) {
-  const s = M.secs[o.si], k = KCOL[s.kind], kc = P[k], ki = P[`${k}-ink`], B = bodyModel(s);
+  const s = model.secs[o.si], k = KIND[s.kind].col, kc = P[k], ki = P[`${k}-ink`], B = bodyModel(s);
   const wide = o.format === 'wide', story = o.format === 'story', gapC = 72;
   const lw = wide ? (b.w - gapC) * .42 : b.w, rw = wide ? b.w - gapC - lw : b.w;
   let L;
   for (const [s0, all] of [[1.3, 1], [1.2, 1], [1.1, 1], [1, 0], [.92, 0], [.85, 0], [.78, 0], [.72, 0]]) {
     const S = s0 * (story ? 1.1 : 1);
-    const from = wrap(ctx, [{t: `From “${D.title}”`, f: F('u', 400, 21 * S), c: P['ink-3']}], lw, wide ? 2 : 1), fLH = 30 * S;
+    const from = wrap(ctx, [{t: `From “${doc.title}”`, f: F('u', 400, 21 * S), c: P['ink-3']}], lw, wide ? 2 : 1), fLH = 30 * S;
     const title = balanced(ctx, [{t: s.title, f: F('d', 750, 64 * S, -.045), c: P.ink}], lw, 3), tLH = 64 * S;
     const sum = s.summary && !s.derived ? wrap(ctx, [{t: s.summary, f: F('r', 400, 30 * S), c: P['ink-2']}], lw, 3) : [], sLH = 30 * S * 1.45;
     const headH = 76 * S, leftH = headH + from.length * fLH + 16 * S + title.length * tLH + (sum.length ? 24 * S + sum.length * sLH : 0);
@@ -2393,7 +2466,7 @@ function layoutSection(ctx, P, b, o) {
   const top = b.y + (story ? Math.max(0, (b.h - total) / 2) : 0);
   let y = top;
   pill(ctx, s.chip, b.x, y, F('u', 600, 19 * S), kc, ki, null);
-  rightText(ctx, `${pad(s.i + 1)} / ${pad(M.secs.length)}`, b.x + lw, y + 20 * S + 21 * S * .36, F('m', 500, 21 * S), P['ink-3']);
+  rightText(ctx, `${pad(s.i + 1)} / ${pad(model.secs.length)}`, b.x + lw, y + 20 * S + 21 * S * .36, F('m', 500, 21 * S), P['ink-3']);
   y += L.headH;
   y += drawText(ctx, L.from, b.x, y, L.fLH, P) + 16 * S;
   y += drawText(ctx, L.title, b.x, y, L.tLH, P);
@@ -2423,10 +2496,10 @@ async function renderCard(o) {
   return cv;
 }
 const slug = s => String(s).toLowerCase().replace(/[^\p{L}\p{N}]+/gu, '-').replace(/^-+|-+$/g, '').slice(0, 48) || 'answer';
-const imgName = () => `unwall-${slug(IMG.type === 'sec' ? M.secs[IMG.si].title : D.title)}-${IMG.format}.png`;
+const imgName = () => `unwall-${slug(IMG.type === 'sec' ? model.secs[IMG.si].title : doc.title)}-${IMG.format}.png`;
 function openImage(type, si = 0) {
-  if (!M) return;
-  let saved = {}; try { saved = JSON.parse(localStorage.getItem('unwall.img') || '{}') } catch {}
+  if (!model) return;
+  let saved = {}; try { saved = JSON.parse(pref.get('img', '{}')) } catch {}
   Object.assign(IMG, {type, si, format: FORMATS[saved.format] ? saved.format : IMG.format, theme: /^(light|dark)$/.test(saved.theme) ? saved.theme : effTheme()});
   paintImgOpts(); imgActions();
   const d = $('#imgDlg'); if (!d.open) d.showModal();
@@ -2434,7 +2507,7 @@ function openImage(type, si = 0) {
 }
 function setImgOpt(key, val) {
   IMG[key] = val;
-  try { localStorage.setItem('unwall.img', JSON.stringify({format: IMG.format, theme: IMG.theme})) } catch {}
+  pref.set('img', JSON.stringify({format: IMG.format, theme: IMG.theme}));
   paintImgOpts(); drawImage();
 }
 function paintImgOpts() {
@@ -2459,7 +2532,7 @@ async function drawImage() {
     if (IMG.url) URL.revokeObjectURL(IMG.url);
     Object.assign(IMG, {blob, url: URL.createObjectURL(blob)});
     $('#imgPrev').src = IMG.url;
-    $('#imgPrev').alt = `Image card: ${IMG.type === 'sec' ? M.secs[IMG.si].title : D.title}`;
+    $('#imgPrev').alt = `Image card: ${IMG.type === 'sec' ? model.secs[IMG.si].title : doc.title}`;
   } catch { if (my === drawImage.n) toast('This browser could not draw the image.') }
   finally { if (my === drawImage.n) { stage.classList.remove('busy'); btns.forEach(x => x.disabled = false) } }
 }
@@ -2543,14 +2616,14 @@ async function selfTest() {
   eq('sentences', sentences('ACID since 4.0 is fine. **Bold end.** Next!'), ['ACID since 4.0 is fine.', '**Bold end.**', 'Next!']);
   eq('no-heading list', analyze('Here are the main options:\n\n1. **Rent** costs less up front and keeps you flexible for a few years.\n2. **Buy** builds equity over time but ties up a large deposit.\n3. **Wait** lets prices settle, though rents keep rising meanwhile.').secs.map(s => s.title), ['Rent', 'Buy', 'Wait']);
   // image cards: every format and every body layout has to draw without throwing
-  const keep = [D, M];
+  const keep = [doc, model];
   try {
-    D = {title: A.title}; M = A;
+    doc = {title: A.title}; model = A;
     for (const f of Object.keys(FORMATS)) { const cv = await renderCard({type: 'gist', si: 0, format: f, theme: f === 'wide' ? 'dark' : 'light'}); eq(`image gist ${f}`, [cv.width, cv.height], FORMATS[f]) }
     for (const si of [2, 3, 4, 5, 7]) eq(`image part ${si + 1} (${A.secs[si].kind})`, (await renderCard({type: 'sec', si, format: 'portrait', theme: 'light'})).height, 1350);
-    D = {title: B.title}; M = B;
+    doc = {title: B.title}; model = B;
     eq('image code part', (await renderCard({type: 'sec', si: 3, format: 'story', theme: 'dark'})).height, 1920);
-  } catch (e) { eq('image render', String(e), 'no error') } finally { [D, M] = keep }
+  } catch (e) { eq('image render', String(e), 'no error') } finally { [doc, model] = keep }
   // bookmarklet: run it on fake chat pages, then decode what the app receives
   let got = '';
   const grab = html => {
@@ -2590,10 +2663,10 @@ async function selfTest() {
   // pages are measured: on the examples nothing spills off a card, and every part gets story slides
   await openDoc({id: 'selftest', md: '', title: A.title, checks: {}, seen: [], temp: true}, A);
   setMode('cards');
-  eq('cards fit', $$('#deck .card-body').filter(b => b.scrollHeight > b.clientHeight + 4).map(b => b.closest('.card').dataset.j), []);
-  eq('cards cover every part', new Set(C.filter(c => c.t === 'sec').map(c => c.s.i)).size, A.secs.length);
+  eq('cards fit', $$('#deck .card-body').filter(overflows).map(b => b.closest('.card').dataset.j), []);
+  eq('cards cover every part', new Set(deck.filter(c => c.t === 'sec').map(c => c.s.i)).size, A.secs.length);
   openStory();
-  eq('story slides', [$$('#stSlides .st-slide').length >= A.secs.length + 3, $$('#stSlides .st-body').filter(b => b.scrollHeight > b.clientHeight + 4).length], [true, 0]);
+  eq('story slides', [$$('#stSlides .st-slide').length >= A.secs.length + 3, $$('#stSlides .st-body').filter(overflows).length], [true, 0]);
   closeStory(); setMode('overview'); goHome();
   const bad = res.filter(r => !r[1]);
   console.table(res.map(([name, ok, got, want]) => ({name, ok, got: JSON.stringify(got), want: JSON.stringify(want)})));
@@ -2611,30 +2684,30 @@ const actions = {
   theme: () => {
     const root = document.documentElement;
     root.dataset.theme = effTheme() === 'dark' ? 'light' : 'dark';
-    try { localStorage.setItem('unwall.theme', root.dataset.theme) } catch {}
+    pref.set('theme', root.dataset.theme);
   },
   share: () => openShare(),
   close: t => closeDialog(t.closest('dialog')),
-  fprev: () => openSection(fi - 1),
-  fnext: () => openSection(fi + 1),
-  prev: () => setCard(ci - 1),
-  next: () => setCard(ci + 1),
+  fprev: () => openSection(focusIdx - 1),
+  fnext: () => openSection(focusIdx + 1),
+  prev: () => setCard(cardIdx - 1),
+  next: () => setCard(cardIdx + 1),
   skim: toggleSkim,
   fold: t => { const all = $$('.r-sec'), anyOpen = all.some(d => d.open); all.forEach(d => d.open = !anyOpen); $('span', t).textContent = anyOpen ? 'Expand all' : 'Collapse all' },
-  save: () => { delete D.temp; const docs = loadDocs(); if (!docs.some(d => d.id === D.id)) docs.unshift(D); saveDocs(docs); $('.banner')?.remove(); toast('Saved to your library') },
+  save: () => { delete doc.temp; const docs = loadDocs(); if (!docs.some(d => d.id === doc.id)) docs.unshift(doc); saveDocs(docs); $('.banner')?.remove(); toast('Saved to your library') },
   'copy-code': t => copyText(t.closest('.codebox').querySelector('code').textContent, 'Code copied'),
-  'copy-snippet': t => copyText(M.codes[+t.dataset.n].text, 'Code copied'),
+  'copy-snippet': t => copyText(model.codes[+t.dataset.n].text, 'Code copied'),
   'share-link': shareLink,
   'share-tldr': () => copyText(tldrText(), 'TL;DR copied'),
-  'share-md': () => copyText(M.md, 'Clean Markdown copied'),
-  'share-native': () => navigator.share?.({title: D.title, text: tldrText(), url: (D.ls ? shortURL() : shareURL) || undefined}).catch(() => {}),
+  'share-md': () => copyText(model.md, 'Clean Markdown copied'),
+  'share-native': () => navigator.share?.({title: doc.title, text: tldrText(), url: (doc.ls ? shortURL() : shareURL) || undefined}).catch(() => {}),
   story: () => openStory(),
   'st-close': closeStory,
   'st-own': () => { closeStory(); goHome(); $('#input').focus() },
   'st-pause': () => stPause(!ST.paused),
   'img-gist': () => { closeDialog($('#share')); openImage('gist') },
-  'img-sec': () => openImage('sec', fi),
-  'img-card': () => { const c = C[ci]; c?.t === 'sec' ? openImage('sec', c.s.i) : openImage('gist') },
+  'img-sec': () => openImage('sec', focusIdx),
+  'img-card': () => { const c = deck[cardIdx]; c?.t === 'sec' ? openImage('sec', c.s.i) : openImage('gist') },
   'img-save': () => IMG.blob && saveBlob(IMG.blob, imgName(), 'Image'),
   export: exportLibrary,
   import: () => $('#importFile').click(),
@@ -2645,66 +2718,59 @@ const actions = {
   },
   'img-share': () => {
     if (!IMG.blob) return;
-    navigator.share({files: [new File([IMG.blob], imgName(), {type: 'image/png'})], title: D.title}).catch(e => { if (e?.name !== 'AbortError') toast('Sharing failed. Download the image instead.') });
+    navigator.share({files: [new File([IMG.blob], imgName(), {type: 'image/png'})], title: doc.title}).catch(e => { if (e?.name !== 'AbortError') toast('Sharing failed. Download the image instead.') });
   },
 };
-document.addEventListener('DOMContentLoaded', () => {
-  if (!window.marked || !window.DOMPurify) { toast('The Markdown parser did not load. Check your connection and reload.'); return }
-  marked.use({renderer: {image(href, title, text) { return href ? `<a href="${esc(href)}">[image${text ? ': ' + text : ''}]</a>` : (text || '') }}});
-  DOMPurify.addHook('uponSanitizeAttribute', (node, a) => { if (a.attrName === 'class' && !/^language-[\w+#-]+$/.test(a.attrValue)) a.keepAttr = false });
-  window.hljs?.configure({ignoreUnescapedHTML: true});
-  // only exists inside the claude.ai viewer; everywhere else downloads use a plain link
-  window.claude?.use?.('downloads')?.then(ns => { dl = ns; if ($('#imgDlg').open) imgActions() }, () => {});
-  document.body.dataset.screen = 'home';
-  if (framed || !navigator.clipboard?.readText) $('#clipBtn').hidden = true;
-  loadExample('salary');
-  renderRecent();
-
-  document.addEventListener('click', e => {
-    const t = e.target.closest('.chk,[data-toc],[data-mode],[data-open],[data-go],[data-ex],[data-del],[data-id],[data-fmt],[data-ith],[data-act]');
-    if (!t) return;
-    if (t.dataset.fmt) return setImgOpt('format', t.dataset.fmt);
-    if (t.dataset.ith) return setImgOpt('theme', t.dataset.ith);
-    if (t.matches('.chk')) {
-      const key = t.dataset.key; D.checks[key] = !D.checks[key]; saveDoc();
-      $$(`li[data-key="${key}"]`).forEach(li => paint(li, D.checks[key])); progress();
-      return;
-    }
-    if (t.dataset.toc != null) { e.preventDefault(); $('#r-' + t.dataset.toc)?.scrollIntoView({behavior: reduced ? 'auto' : 'smooth', block: 'start'}); return }
-    if (t.dataset.mode) return setMode(t.dataset.mode);
-    if (t.dataset.open != null) return openSection(+t.dataset.open, t.dataset.flash);
-    if (t.dataset.go) { closeDialog($('#focus')); closeDialog($('#share')); return setMode(t.dataset.go) }
-    if (t.dataset.ex) return loadExample(t.dataset.ex);
-    if (t.dataset.del) return delDoc(t.dataset.del);
-    if (t.dataset.id) { const d = loadDocs().find(x => x.id === t.dataset.id); if (d) { closeLibrary(); openDoc(d) } return }
-    actions[t.dataset.act]?.(t, e);
-  });
-  document.addEventListener('paste', e => {
-    const t = e.target;
-    if (t.closest?.('input, [contenteditable]') || (t.closest?.('textarea') && t.id !== 'input')) return;
-    if ($('#focus').open || $('#share').open || $('#imgDlg').open || !$('#story').hidden) return;
-    const text = clipText(e.clipboardData);
-    if (!text.trim()) return;
-    e.preventDefault();
-    ingest(text);
-  });
-  document.addEventListener('keydown', e => {
-    if (!$('#story').hidden && !document.querySelector('dialog[open]')) {
-      if (e.key === 'Escape') closeStory();
-      else if (e.key === 'ArrowRight') stGo(ST.i + 1);
-      else if (e.key === 'ArrowLeft') stGo(ST.i - 1);
-      else if (e.key === ' ' && !e.target.closest('button')) { e.preventDefault(); stPause(!ST.paused) }
-      return;
-    }
-    if (e.key === 'Escape' && !$('#lib').hidden) return closeLibrary();
-    if (e.target.closest('input, textarea, [contenteditable]') || e.metaKey || e.ctrlKey || e.altKey || $('#imgDlg').open) return;
-    if ($('#focus').open) { if (e.key === 'ArrowRight') openSection(fi + 1); if (e.key === 'ArrowLeft') openSection(fi - 1); return }
-    if ($('#share').open || !$('#lib').hidden || SCREEN !== 'digest') return;
-    if ('123'.includes(e.key) && e.key.length === 1) setMode(['overview', 'cards', 'read'][+e.key - 1]);
-    else if (MODE === 'cards' && (e.key === 'ArrowRight' || e.key === ' ')) { e.preventDefault(); setCard(ci + 1) }
-    else if (MODE === 'cards' && e.key === 'ArrowLeft') setCard(ci - 1);
-    else if (MODE === 'read' && e.key.toLowerCase() === 's') toggleSkim();
-  });
+// clicks on anything with a data-* role; data-act names an entry in actions
+function onClick(e) {
+  const t = e.target.closest('.chk,[data-toc],[data-mode],[data-open],[data-go],[data-ex],[data-del],[data-id],[data-fmt],[data-ith],[data-act]');
+  if (!t) return;
+  if (t.dataset.fmt) return setImgOpt('format', t.dataset.fmt);
+  if (t.dataset.ith) return setImgOpt('theme', t.dataset.ith);
+  if (t.matches('.chk')) {
+    const key = t.dataset.key; doc.checks[key] = !doc.checks[key]; saveDoc();
+    $$(`li[data-key="${key}"]`).forEach(li => paint(li, doc.checks[key])); progress();
+    return;
+  }
+  if (t.dataset.toc != null) { e.preventDefault(); $('#r-' + t.dataset.toc)?.scrollIntoView({behavior: reduced ? 'auto' : 'smooth', block: 'start'}); return }
+  if (t.dataset.mode) return setMode(t.dataset.mode);
+  if (t.dataset.open != null) return openSection(+t.dataset.open, t.dataset.flash);
+  if (t.dataset.go) { closeDialog($('#focus')); closeDialog($('#share')); return setMode(t.dataset.go) }
+  if (t.dataset.ex) return loadExample(t.dataset.ex);
+  if (t.dataset.del) return delDoc(t.dataset.del);
+  if (t.dataset.id) { const d = loadDocs().find(x => x.id === t.dataset.id); if (d) { closeLibrary(); openDoc(d) } return }
+  actions[t.dataset.act]?.(t, e);
+}
+// a paste anywhere outside a text field unwalls it, unless a sheet or the story is open
+function onPaste(e) {
+  const t = e.target;
+  if (t.closest?.('input, [contenteditable]') || (t.closest?.('textarea') && t.id !== 'input')) return;
+  if ($('#focus').open || $('#share').open || $('#imgDlg').open || !$('#story').hidden) return;
+  const text = clipText(e.clipboardData);
+  if (!text.trim()) return;
+  e.preventDefault();
+  ingest(text);
+}
+// the topmost layer gets the keys: story, then library, then sheets, then the digest views
+function onKey(e) {
+  if (!$('#story').hidden && !document.querySelector('dialog[open]')) {
+    if (e.key === 'Escape') closeStory();
+    else if (e.key === 'ArrowRight') stGo(ST.i + 1);
+    else if (e.key === 'ArrowLeft') stGo(ST.i - 1);
+    else if (e.key === ' ' && !e.target.closest('button')) { e.preventDefault(); stPause(!ST.paused) }
+    return;
+  }
+  if (e.key === 'Escape' && !$('#lib').hidden) return closeLibrary();
+  if (e.target.closest('input, textarea, [contenteditable]') || e.metaKey || e.ctrlKey || e.altKey || $('#imgDlg').open) return;
+  if ($('#focus').open) { if (e.key === 'ArrowRight') openSection(focusIdx + 1); if (e.key === 'ArrowLeft') openSection(focusIdx - 1); return }
+  if ($('#share').open || !$('#lib').hidden || SCREEN !== 'digest') return;
+  if ('123'.includes(e.key) && e.key.length === 1) setMode(MODES[+e.key - 1]);
+  else if (MODE === 'cards' && (e.key === 'ArrowRight' || e.key === ' ')) { e.preventDefault(); setCard(cardIdx + 1) }
+  else if (MODE === 'cards' && e.key === 'ArrowLeft') setCard(cardIdx - 1);
+  else if (MODE === 'read' && e.key.toLowerCase() === 's') toggleSkim();
+}
+// home screen: the textarea, the drop zone, library search and import, the bookmarklet button
+function wireInput() {
   const ta = $('#input');
   ta.addEventListener('input', () => { if (ta.dataset.example) { delete ta.dataset.example; $$('[data-ex]').forEach(b => b.setAttribute('aria-pressed', 'false')) } inputMeta() });
   ta.addEventListener('focus', () => { if (ta.dataset.example) requestAnimationFrame(() => ta.select()) });
@@ -2723,20 +2789,27 @@ document.addEventListener('DOMContentLoaded', () => {
     const bm = $('#bmLink'); bm.href = bookmarklet(); $('#bm').hidden = false;
     bm.addEventListener('click', e => { e.preventDefault(); toast('Drag this button to your bookmarks bar. No bar? Press ⌘⇧B (Ctrl+Shift+B on Windows).') });
   }
+}
+// sheets close with their own animation, on Escape or a click on the backdrop
+function wireDialogs() {
   $$('dialog.sheet').forEach(d => {
     d.addEventListener('cancel', e => { e.preventDefault(); closeDialog(d) });
     d.addEventListener('click', e => { if (e.target === d) closeDialog(d) });
   });
+}
+// the overview title is editable in place; the new name spreads to the other views
+function wireTitleEdit() {
   const ov = $('#v-overview');
   ov.addEventListener('focusout', e => {
     if (e.target.id !== 'docTitle') return;
-    D.title = e.target.textContent.replace(/\s+/g, ' ').trim() || M.title;
-    e.target.textContent = D.title; saveDoc(); document.title = `${D.title} · Unwall`;
-    $$('.read-title, .card-title.xl').forEach(el => el.textContent = D.title);
+    doc.title = e.target.textContent.replace(/\s+/g, ' ').trim() || model.title;
+    e.target.textContent = doc.title; saveDoc(); document.title = `${doc.title} · Unwall`;
+    $$('.read-title, .card-title.xl').forEach(el => el.textContent = doc.title);
   });
   ov.addEventListener('keydown', e => { if (e.target.id === 'docTitle' && e.key === 'Enter') { e.preventDefault(); e.target.blur() } });
-
-  // cards: drag to swipe, tap left third to go back, anywhere else to advance
+}
+// cards: drag to swipe, tap left third to go back, anywhere else to advance
+function wireCardSwipe() {
   const cv = $('#v-cards'); let drag = null;
   cv.addEventListener('pointerdown', e => {
     const card = e.target.closest('.card[data-pos="0"]');
@@ -2753,19 +2826,20 @@ document.addEventListener('DOMContentLoaded', () => {
     if (!drag || e.pointerId !== drag.id) return;
     const {card, dx, on, t, x} = drag; drag = null;
     card.classList.remove('dragging'); card.style.transform = '';
-    if (on) { const v = dx / (performance.now() - t); if (dx < -80 || v < -.5) setCard(ci + 1); else if (dx > 80 || v > .5) setCard(ci - 1) }
-    else if (e.type === 'pointerup' && Math.abs(e.clientX - x) < 6 && !getSelection().toString()) { const rc = card.getBoundingClientRect(); setCard(e.clientX < rc.left + rc.width / 3 ? ci - 1 : ci + 1) }
+    if (on) { const v = dx / (performance.now() - t); if (dx < -80 || v < -.5) setCard(cardIdx + 1); else if (dx > 80 || v > .5) setCard(cardIdx - 1) }
+    else if (e.type === 'pointerup' && Math.abs(e.clientX - x) < 6 && !getSelection().toString()) { const rc = card.getBoundingClientRect(); setCard(e.clientX < rc.left + rc.width / 3 ? cardIdx - 1 : cardIdx + 1) }
   };
   cv.addEventListener('pointerup', end); cv.addEventListener('pointercancel', end);
-
-  // story: tap right to advance, left third to go back, hold to pause, swipe sideways to flip, swipe down to leave
+}
+// story: tap right to advance, left third to go back, hold to pause, swipe sideways to flip, swipe down to leave
+function wireStoryGestures() {
   const sf = $('#stFrame');
   sf.addEventListener('pointerdown', e => {
     if (e.button > 0 || e.target.closest('button, a, .codebox, .tablewrap, .st-top')) return;
     ST.press = {x: e.clientX, y: e.clientY, id: e.pointerId};
     clearTimeout(ST.hold); ST.hold = setTimeout(() => ST.held = true, 240);
   });
-  const stEnd = e => {
+  const end = e => {
     const p = ST.press; if (!p || e.pointerId !== p.id) return;
     ST.press = null; clearTimeout(ST.hold);
     const was = ST.held; ST.held = false;
@@ -2775,25 +2849,49 @@ document.addEventListener('DOMContentLoaded', () => {
     if (Math.abs(dx) > 50 && Math.abs(dx) > Math.abs(dy)) return stGo(ST.i + (dx < 0 ? 1 : -1));
     if (Math.abs(dx) < 8 && Math.abs(dy) < 8) { const r = sf.getBoundingClientRect(); stGo(ST.i + (e.clientX < r.left + r.width / 3 ? -1 : 1)) }
   };
-  sf.addEventListener('pointerup', stEnd); sf.addEventListener('pointercancel', stEnd);
+  sf.addEventListener('pointerup', end); sf.addEventListener('pointercancel', end);
+}
+// pages were measured for one window size and one set of fonts: measure again when either changes, staying on the same part
+function wireRemeasure() {
   // a piece taller than its page shows a fade until it is scrolled to the end
-  document.addEventListener('scroll', e => { const b = e.target; if (b.matches?.('.card-body, .st-body') && b.scrollHeight > b.clientHeight + 4) b.classList.toggle('scrolls', b.scrollTop + b.clientHeight < b.scrollHeight - 4) }, true);
-  // pages were measured for one window size and one set of fonts: measure again when either changes, staying on the same part
+  document.addEventListener('scroll', e => { const b = e.target; if (b.matches?.('.card-body, .st-body') && overflows(b)) b.classList.toggle('scrolls', b.scrollTop + b.clientHeight < b.scrollHeight - 4) }, true);
   const remeasure = force => {
     if (!$('#story').hidden) { const si = $('#stSlides .st-slide.on')?.dataset.si; openStory(si == null ? undefined : +si) }
-    if (SCREEN === 'digest' && MODE === 'cards' && C.length && (force || renderCards.size !== deckSize())) { const c = C[ci]; renderCards(); if (c?.t === 'sec') setCard(C.findIndex(x => x.s === c.s)) }
+    if (SCREEN === 'digest' && MODE === 'cards' && deck.length && (force || renderCards.size !== deckSize())) { const c = deck[cardIdx]; renderCards(); if (c?.t === 'sec') setCard(deck.findIndex(x => x.s === c.s)) }
   };
   let rz = 0;
   addEventListener('resize', () => { clearTimeout(rz); rz = setTimeout(remeasure, 220) });
   document.fonts?.addEventListener('loadingdone', () => remeasure(true));
+}
+// links carry their payload in the hash: #topic~secret (short), #d= (long), #add= (bookmarklet)
+function route() {
+  const short = location.hash.match(SHORT);
+  if (short) openFromShort(short[1]);
+  else if (location.hash.startsWith('#d=')) openFromHash();
+  else if (location.hash.startsWith('#add=')) openFromBookmarklet();
+  else if (location.hash === '#selftest') selfTest();
+}
+document.addEventListener('DOMContentLoaded', () => {
+  if (!window.marked || !window.DOMPurify) { toast('The Markdown parser did not load. Check your connection and reload.'); return }
+  marked.use({renderer: {image(href, title, text) { return href ? `<a href="${esc(href)}">[image${text ? ': ' + text : ''}]</a>` : (text || '') }}});
+  DOMPurify.addHook('uponSanitizeAttribute', (node, a) => { if (a.attrName === 'class' && !/^language-[\w+#-]+$/.test(a.attrValue)) a.keepAttr = false });
+  window.hljs?.configure({ignoreUnescapedHTML: true});
+  // only exists inside the claude.ai viewer; everywhere else downloads use a plain link
+  window.claude?.use?.('downloads')?.then(ns => { dl = ns; if ($('#imgDlg').open) imgActions() }, () => {});
+  document.body.dataset.screen = 'home';
+  if (framed || !navigator.clipboard?.readText) $('#clipBtn').hidden = true;
+  loadExample('salary');
+  renderRecent();
 
-  const route = () => {
-    const short = location.hash.match(SHORT);
-    if (short) openFromShort(short[1]);
-    else if (location.hash.startsWith('#d=')) openFromHash();
-    else if (location.hash.startsWith('#add=')) openFromBookmarklet();
-    else if (location.hash === '#selftest') selfTest();
-  };
+  document.addEventListener('click', onClick);
+  document.addEventListener('paste', onPaste);
+  document.addEventListener('keydown', onKey);
+  wireInput();
+  wireDialogs();
+  wireTitleEdit();
+  wireCardSwipe();
+  wireStoryGestures();
+  wireRemeasure();
   route(); window.addEventListener('hashchange', route); // a link pasted into an open tab only changes the hash
 });
 })();
