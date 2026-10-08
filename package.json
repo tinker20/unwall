@@ -1,0 +1,21 @@
+{
+  "name": "unwall",
+  "version": "1.0.0",
+  "description": "Turn walls of AI text into a one-screen gist. Runs entirely in your browser.",
+  "private": true,
+  "type": "module",
+  "license": "MIT",
+  "author": "Sayan Bhattacharya",
+  "homepage": "https://unwall.triagic.com",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/tinker20/unwall.git"
+  },
+  "bugs": "https://github.com/tinker20/unwall/issues",
+  "engines": {
+    "node": ">=20.11"
+  },
+  "scripts": {
+    "dev": "node dev.mjs"
+  }
+}

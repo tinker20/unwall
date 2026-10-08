@@ -1,0 +1,6 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    { "name": "unwall", "runtimeExecutable": "node", "runtimeArgs": ["dev.mjs"], "port": 4173 }
+  ]
+}

@@ -1,0 +1,36 @@
+name: Bug or bad digest
+description: Something broke, or an answer still reads like a wall after unwalling
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: Thanks for reporting. If this is a security problem, use the private report in the Security tab instead.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: What did you see, and what did you expect to see?
+    validations:
+      required: true
+  - type: textarea
+    id: answer
+    attributes:
+      label: The answer you pasted (if relevant)
+      description: Paste the Markdown, or a shortened version that still shows the problem. Remove anything private first.
+      render: markdown
+  - type: input
+    id: source
+    attributes:
+      label: Where did the answer come from?
+      placeholder: ChatGPT, Claude, Gemini, other
+  - type: dropdown
+    id: lens
+    attributes:
+      label: Which part of Unwall?
+      multiple: true
+      options: [Overview, Cards, Read, Story, Share link, Image export, Bookmarklet, Library, Other]
+  - type: input
+    id: browser
+    attributes:
+      label: Browser and device
+      placeholder: Chrome 140 on macOS, Safari on iPhone 15, ...
