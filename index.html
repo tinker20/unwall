@@ -1009,11 +1009,11 @@ Start with **PostgreSQL** unless your data is genuinely document-shaped and sche
 Would you like me to sketch a starter schema for your app?
 </script>
 
-<script src="https://cdnjs.cloudflare.com/ajax/libs/marked/12.0.2/marked.min.js"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/dompurify/3.1.6/purify.min.js"></script>
-<script defer src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
-<script defer src="https://cdnjs.cloudflare.com/ajax/libs/turndown/7.1.2/turndown.min.js"></script>
-<script defer src="https://cdn.jsdelivr.net/npm/turndown-plugin-gfm@1.0.2/dist/turndown-plugin-gfm.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/marked/12.0.2/marked.min.js" integrity="sha384-/TQbtLCAerC3jgaim+N78RZSDYV7ryeoBCVqTuzRrFec2akfBkHS7ACQ3PQhvMVi" crossorigin="anonymous"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/dompurify/3.1.6/purify.min.js" integrity="sha384-+VfUPEb0PdtChMwmBcBmykRMDd+v6D/oFmB3rZM/puCMDYcIvF968OimRh4KQY9a" crossorigin="anonymous"></script>
+<script defer src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js" integrity="sha384-F/bZzf7p3Joyp5psL90p/p89AZJsndkSoGwRpXcZhleCWhd8SnRuoYo4d0yirjJp" crossorigin="anonymous"></script>
+<script defer src="https://cdnjs.cloudflare.com/ajax/libs/turndown/7.1.2/turndown.min.js" integrity="sha384-m6AyXEhyWRg2s2wrkDV64LGkaManYgMSAjn2U+zymzSJ42WthRSjCu1AqZJhoQV0" crossorigin="anonymous"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/turndown-plugin-gfm@1.0.2/dist/turndown-plugin-gfm.js" integrity="sha384-2TroN1N6OfLQ+K4qttptnIfMREzUlMa3hW/nZqDZXv7Sm9BkESfGEupDEqCbzyRl" crossorigin="anonymous"></script>
 <script>
 (() => {
 'use strict';
@@ -1941,7 +1941,9 @@ async function importFiles(files) {
 const b64u = b => { let s = ''; for (let i = 0; i < b.length; i += 0x8000) s += String.fromCharCode(...b.subarray(i, i + 0x8000)); return btoa(s).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '') };
 const unb64 = s => Uint8Array.from(atob(s.replace(/-/g, '+').replace(/_/g, '/')), c => c.charCodeAt(0));
 const deflate = async s => new Uint8Array(await new Response(new Blob([s]).stream().pipeThrough(new CompressionStream('deflate-raw'))).arrayBuffer());
-const inflate = b => new Response(new Blob([b]).stream().pipeThrough(new DecompressionStream('deflate-raw'))).text();
+// a crafted link can inflate to gigabytes and hang the tab, so stop well past any real answer
+const MAX_MD = 1 << 20;
+const inflate = b => { let n = 0; return new Response(new Blob([b]).stream().pipeThrough(new DecompressionStream('deflate-raw')).pipeThrough(new TransformStream({transform(c, q) { if ((n += c.length) > MAX_MD) throw new RangeError('link too large'); q.enqueue(c) }}))).text() };
 const appURL = () => location.href.split('#')[0];
 // fallback link: the whole answer rides in the URL fragment, no server involved, but it runs to thousands of characters
 const packLink = async md => appURL() + '#d=' + b64u(await deflate(md));
@@ -2059,9 +2061,12 @@ function grabAnswer(app) {
   open(url) || (location.href = url);
 }
 const bookmarklet = () => 'javascript:' + encodeURIComponent(`(${grabAnswer})(${JSON.stringify(location.origin + location.pathname)})`);
+// #add= saves straight to the library, so a crafted giant link could push out the visitor's oldest answers
+const MAX_ADD = 200 * 1024;
 function openFromBookmarklet() {
   const s = location.hash.slice(5);
   history.replaceState(null, '', location.pathname + location.search);
+  if (s.length * .75 > MAX_ADD) return toast('That answer is too long to add from a link. Copy it and paste it here instead.');
   let html; try { html = new TextDecoder().decode(unb64(s)) } catch { return toast('That link is incomplete or damaged.') }
   ingest(htmlToMd(html));
 }
@@ -2575,6 +2580,9 @@ async function selfTest() {
   eq('plain-text headings', promoteHeads('Why it matters\n\nBecause it does, mostly.\n\nWhat to do\n\nStart small and keep going.'), '## Why it matters\n\nBecause it does, mostly.\n\n## What to do\n\nStart small and keep going.');
   const L = marked.lexer('3. one\n4. two\n5. three\n6. four');
   eq('list pages rejoin', [groups(L).length, rejoin(groups(L).flat()).map(t => [t.items.length, t.start])], [4, [[4, 3]]]);
+  // links are untrusted: a deflate bomb stops at the cap instead of hanging the tab
+  const bomb = async n => inflate(await deflate('x'.repeat(n))).then(s => s.length, () => 'stopped');
+  eq('deflate bomb stops', [await bomb(MAX_MD), await bomb(MAX_MD + 1)], [MAX_MD, 'stopped']);
   // story links: the secret derives id and key; the store never sees either
   const sec = crypto.getRandomValues(new Uint8Array(10)), sealed = await seal('hello **world**', sec);
   eq('short link roundtrip', [sealed.id.length, await unseal(sealed.body, sec), b64u(sec).length], [12, 'hello **world**', 14]);
