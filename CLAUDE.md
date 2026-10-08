@@ -41,4 +41,4 @@ The pipeline runs `normalize` → `deFluff` → `analyze`. `analyze` lexes with 
 
 ## Style
 
-Match the code around your change: dense one-line helpers, `$` and `$$` for DOM queries, and short comments that explain why. Production deploys only `index.html`.
+Match the code around your change: dense one-line helpers, `$` and `$$` for DOM queries, and short comments that explain why. Production deploys only `index.html` and `og.png`, the social preview card.

@@ -70,7 +70,7 @@ Open http://127.0.0.1:4173/#selftest. The app analyses its two built-in examples
 
 ## Deploy your own
 
-Unwall is one static file. Put `index.html` on any static host, such as Cloudflare Pages, GitHub Pages, Netlify or Vercel.
+Unwall is one static file. Put `index.html` on any static host, such as Cloudflare Pages, GitHub Pages, Netlify or Vercel. Put `og.png`, the social preview card, next to it, then point the `og:url` and `og:image` tags in `index.html` at your own domain.
 
 Short links are optional. Without them, Unwall falls back to long, self-contained `#d=` links. To turn them on:
 
@@ -81,6 +81,7 @@ Short links are optional. Without them, Unwall falls back to long, self-containe
 
 ```
 index.html        the whole app: markup, styles and script, no build step
+og.png            social preview card (1200x630)
 api/s.js          optional short-link store (stores only ciphertext)
 dev.mjs           local dev server: static files plus /api/s
 docs/             README screenshots
