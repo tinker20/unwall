@@ -14,7 +14,9 @@ These rules are the product, not style preferences. Get the maintainer's explici
 
 Each section of `index.html` opens with a `/* ============ name ============ */` banner. Grep for that banner to get the outline.
 
-The pipeline runs `normalize` → `deFluff` → `analyze`. `analyze` lexes with marked, splits into sections, calls `kindOf` and `keyIdeas`, and builds the TL;DR with `lede`. The lens renderers then draw the result: `renderOverview`, `renderCards`, `renderRead` and `openStory`.
+The pipeline runs `normalize` → `deFluff` → `analyze`. `analyze` lexes with marked, cuts parts with `splitParts`, tags each with `kindOf` (labels, icons and colours live in `KIND`) and `describe`, picks `keyIdeas`, and builds the title and TL;DR in `gistOf` with `lede`. The model holds no HTML. The lens renderers then draw the result: `renderOverview` (one builder per card), `renderCards`, `renderRead` and `openStory`.
+
+Module state sits at the top of `state + storage`: `doc` is the stored answer, `model` is its analysis. Event handlers are named in `wiring` (`onClick`, `onKey`, `wire*`), and `DOMContentLoaded` only calls them.
 
 ## Invariants
 
